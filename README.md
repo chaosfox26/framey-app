@@ -78,7 +78,7 @@ AI authorship and a successful build are not evidence that something works.
 
 - The local page listens only on `127.0.0.1`, needs a random token that is part of the link the app opens, and rejects requests with a different `Host` header.
 - The app downloads the latest `main` of the repositories above and runs Fan Control's install script as root on the headset, so use it only with repositories you trust. Plugins run code on your headset.
-- Rejecting plugin packages that contain symlinks or other special files, and skipping symlinks when staging, is in the source on `main`. It is not in the 1.0.1 release builds.
+- Rejecting plugin packages that contain symlinks or other special files, and skipping symlinks when staging, is included from release 1.0.2. The 1.0.1 builds do not have it.
 
 ## Roadmap (not implemented)
 
