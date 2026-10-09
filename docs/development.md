@@ -1,4 +1,4 @@
-# Framy App development notes
+# Framey App development notes
 
 For what the app does, see the [README](../README.md). Identifiers keep the spelling `framey`.
 
@@ -10,7 +10,7 @@ For what the app does, see the [README](../README.md). Identifiers keep the spel
 | `src/ui.html` | The page served at `/`, with the four themes. |
 | `tools/pack.py` | Builds `generated/payload.inc` (a gzip tar of the `framey` and `frame-fan` repositories plus their commit ids) and `generated/ui.inc` (the page). |
 | `tools/build.ps1` | Windows build (pack, then CMake with clang and Ninja). |
-| `tools/make_icon.py` | Rebuilds `assets/framey.ico` from the Framy icon. |
+| `tools/make_icon.py` | Rebuilds `assets/framey.ico` from the Framey icon. |
 | `app.rc`, `app.manifest`, `assets/` | Windows icon and manifest. |
 | `.github/workflows/build.yml` | Builds Windows, Linux x86_64, Linux arm64 and macOS, and attaches them to a release. |
 
@@ -38,4 +38,4 @@ The app keeps its data in `FrameyApp-data` beside the executable and uses a per-
 
 ## Plugin packages
 
-A package is a `.zip` or `.tar.gz` with `plugin.json` at its top level or inside one top folder, plus `main.js` and/or `backend.py`. The id comes from `plugin.json` and falls back to a name derived from the file or repository. Extraction is rejected if the result contains anything other than regular files and directories. See the [Framy plugin guide](https://github.com/chaosfox26/framey/blob/main/docs/plugins.md).
+A package is a `.zip` or `.tar.gz` with `plugin.json` at its top level or inside one top folder, plus `main.js` and/or `backend.py`. The id comes from `plugin.json` and falls back to a name derived from the file or repository. Extraction is rejected if the result contains anything other than regular files and directories. See the [Framey plugin guide](https://github.com/chaosfox26/framey/blob/main/docs/plugins.md).
