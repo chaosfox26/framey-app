@@ -39,7 +39,7 @@ On the headset:
 2. Developer (left menu) > scroll to the bottom > Set User Password.
 3. Keep the headset awake and on the same network as your computer.
 
-Then download the build for your system from [Releases](../../releases). On Linux and macOS unpack it and run `./FrameyApp` in a terminal. On Windows run `FrameyApp-windows.exe`. Enter the headset address (usually `frame`) and click **Install / Update**. Close the app's window or terminal to quit.
+Then download the build for your system from [Releases](https://github.com/chaosfox26/framey-app/releases). On Linux and macOS unpack it and run `./FrameyApp` in a terminal. On Windows run `FrameyApp-windows.exe`. Enter the headset address (usually `frame`) and click **Install / Update**. Close the app's window or terminal to quit.
 
 ## Connection setup and permission prompts
 
