@@ -1,138 +1,237 @@
-#include <windows.h>
-#include <commctrl.h>
-#include <dwmapi.h>
-#include <uxtheme.h>
-
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <memory>
+#include <map>
+#include <mutex>
+#include <random>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <shellapi.h>
+using Sock = SOCKET;
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+extern char** environ;
+using Sock = int;
+#endif
+
 namespace fs = std::filesystem;
+
+constexpr unsigned char kPayload[] = {
+#include "payload.inc"
+};
+constexpr unsigned char kUi[] = {
+#include "ui.inc"
+};
 
 constexpr const char* kOwner = "chaosfox26";
 constexpr const char* kRepos[] = {"framey", "frame-fan"};
 constexpr const char* kHome = "/home/steamos";
+constexpr const char* kThemes[] = {"Magenta", "Blue", "Black", "White"};
 
-enum { ID_HOST = 100, ID_PASS, ID_FAN, ID_INSTALL, ID_CHECK, ID_REMOVE, ID_LOG, ID_STATUS, ID_SWATCH = 200 };
-enum { WM_LOG = WM_APP + 1, WM_STATUS, WM_DONE };
-
-struct Theme {
-  const char* name;
-  COLORREF bg, field, text, accent;
-};
-
-constexpr Theme kThemes[] = {
-    {"Magenta", RGB(20, 0, 28), RGB(44, 0, 60), RGB(255, 222, 255), RGB(255, 0, 200)},
-    {"Blue", RGB(0, 8, 26), RGB(0, 26, 60), RGB(212, 232, 255), RGB(0, 150, 255)},
-    {"Black", RGB(0, 0, 0), RGB(24, 24, 24), RGB(214, 255, 214), RGB(0, 255, 80)},
-    {"White", RGB(238, 235, 222), RGB(255, 255, 250), RGB(24, 24, 24), RGB(24, 24, 24)},
-};
-
-HWND g_wnd, g_title, g_host, g_pass, g_fan, g_log, g_status;
-HWND g_buttons[3], g_swatches[4];
-HFONT g_font, g_big;
-HBRUSH g_bg, g_field;
-int g_dpi = 96, g_theme = 0;
-bool g_fan_on = false;
-std::string g_pw, g_target;
-fs::path g_dir;
-std::atomic<bool> g_busy;
-
-int S(int v) { return MulDiv(v, g_dpi, 96); }
-const Theme& T() { return kThemes[g_theme]; }
-
-void apply_theme(int i) {
-  g_theme = i;
-  if (g_bg) DeleteObject(g_bg);
-  if (g_field) DeleteObject(g_field);
-  g_bg = CreateSolidBrush(T().bg);
-  g_field = CreateSolidBrush(T().field);
-  if (!g_wnd) return;
-  BOOL dark = i != 3;
-  DwmSetWindowAttribute(g_wnd, 20, &dark, sizeof dark);
-  COLORREF bg = T().bg, fg = T().text;
-  DwmSetWindowAttribute(g_wnd, 35, &bg, sizeof bg);
-  DwmSetWindowAttribute(g_wnd, 36, &fg, sizeof fg);
-  SetWindowTheme(g_log, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
-  RedrawWindow(g_wnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
-  fs::create_directories(g_dir);
-  std::ofstream(g_dir / "theme.txt") << i;
-}
-
-std::string text(HWND h) {
-  std::string s(GetWindowTextLengthA(h) + 1, '\0');
-  s.resize(GetWindowTextA(h, s.data(), (int)s.size()));
-  return s;
-}
-
-void post(UINT msg, std::string s) { PostMessageA(g_wnd, msg, 0, (LPARAM) new std::string(std::move(s))); }
-void log(std::string s) { post(WM_LOG, std::move(s)); }
-
-std::string self() {
-  char p[MAX_PATH];
-  return std::string(p, GetModuleFileNameA(nullptr, p, MAX_PATH));
-}
+using Args = std::vector<std::string>;
 
 struct Run {
   std::string out;
-  DWORD code = 1;
+  int code = 1;
 };
 
-Run run(const std::string& cmd, const std::string& input = {}, bool askpass = false) {
+std::mutex g_mu;
+std::string g_log, g_status, g_pw, g_target, g_source;
+bool g_fan = false;
+std::atomic<bool> g_busy{false}, g_quit{false};
+std::atomic<long long> g_seen{0};
+fs::path g_dir, g_work;
+std::string g_token;
+int g_port = 0;
+
+long long now_s() { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+void log(const std::string& s) {
+  std::lock_guard l(g_mu);
+  g_log += s + "\n";
+}
+
+void status(const std::string& s) {
+  std::lock_guard l(g_mu);
+  g_status = s;
+}
+
+std::string self() {
+#if defined(_WIN32)
+  char p[MAX_PATH];
+  return std::string(p, GetModuleFileNameA(nullptr, p, MAX_PATH));
+#elif defined(__APPLE__)
+  char p[4096];
+  uint32_t n = sizeof p;
+  return _NSGetExecutablePath(p, &n) ? "" : fs::weakly_canonical(p).string();
+#else
+  return fs::read_symlink("/proc/self/exe").string();
+#endif
+}
+
+void set_env(const char* k, const char* v) {
+#ifdef _WIN32
+  SetEnvironmentVariableA(k, v);
+#else
+  v ? setenv(k, v, 1) : unsetenv(k);
+#endif
+}
+
+#ifdef _WIN32
+std::string quote(const std::string& a) {
+  if (!a.empty() && a.find_first_of(" \t\n\v\"") == std::string::npos) return a;
+  std::string o = "\"";
+  for (size_t i = 0; i < a.size(); i++) {
+    size_t bs = 0;
+    while (i < a.size() && a[i] == '\\') bs++, i++;
+    if (i == a.size()) {
+      o.append(bs * 2, '\\');
+      break;
+    }
+    o.append(a[i] == '"' ? bs * 2 + 1 : bs, '\\');
+    o += a[i];
+  }
+  return o + "\"";
+}
+
+Run run_raw(const Args& a, const std::string& in) {
   SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
   HANDLE outR, outW, inR, inW;
   CreatePipe(&outR, &outW, &sa, 0);
   CreatePipe(&inR, &inW, &sa, 0);
   SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
   SetHandleInformation(inW, HANDLE_FLAG_INHERIT, 0);
-  if (askpass) {
-    SetEnvironmentVariableA("FRAMEY_ASKPASS", "1");
-    SetEnvironmentVariableA("FRAMEY_PW", g_pw.c_str());
-    SetEnvironmentVariableA("SSH_ASKPASS", self().c_str());
-    SetEnvironmentVariableA("SSH_ASKPASS_REQUIRE", "force");
-  }
   STARTUPINFOA si{sizeof si};
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdInput = inR;
   si.hStdOutput = si.hStdError = outW;
   PROCESS_INFORMATION pi{};
-  std::string line = cmd;
+  std::string line;
+  for (auto& s : a) line += (line.empty() ? "" : " ") + quote(s);
   Run r;
   if (CreateProcessA(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
     CloseHandle(inR);
     CloseHandle(outW);
     DWORD n;
-    if (!input.empty()) WriteFile(inW, input.data(), (DWORD)input.size(), &n, nullptr);
+    if (!in.empty()) WriteFile(inW, in.data(), (DWORD)in.size(), &n, nullptr);
     CloseHandle(inW);
     char buf[4096];
     while (ReadFile(outR, buf, sizeof buf, &n, nullptr) && n) r.out.append(buf, n);
+    DWORD code = 1;
     WaitForSingleObject(pi.hProcess, INFINITE);
-    GetExitCodeProcess(pi.hProcess, &r.code);
+    GetExitCodeProcess(pi.hProcess, &code);
+    r.code = (int)code;
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
   } else {
-    r.out = "could not start: " + cmd.substr(0, cmd.find(' '));
+    r.out = "could not start " + a[0];
     for (HANDLE h : {inR, inW, outW}) CloseHandle(h);
   }
   CloseHandle(outR);
+  return r;
+}
+#else
+Run run_raw(const Args& a, const std::string& in) {
+  int ip[2], op[2];
+  if (pipe(ip) || pipe(op)) return {"pipe failed", 1};
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_adddup2(&fa, ip[0], 0);
+  posix_spawn_file_actions_adddup2(&fa, op[1], 1);
+  posix_spawn_file_actions_adddup2(&fa, op[1], 2);
+  for (int fd : {ip[0], ip[1], op[0], op[1]}) posix_spawn_file_actions_addclose(&fa, fd);
+  std::vector<char*> av;
+  for (auto& s : a) av.push_back(const_cast<char*>(s.c_str()));
+  av.push_back(nullptr);
+  pid_t pid;
+  Run r;
+  if (posix_spawnp(&pid, av[0], &fa, nullptr, av.data(), environ)) {
+    r.out = "could not start " + a[0];
+    for (int fd : {ip[0], ip[1], op[0], op[1]}) close(fd);
+  } else {
+    close(ip[0]);
+    close(op[1]);
+    for (size_t off = 0; off < in.size();) {
+      ssize_t n = write(ip[1], in.data() + off, in.size() - off);
+      if (n <= 0) break;
+      off += (size_t)n;
+    }
+    close(ip[1]);
+    char buf[4096];
+    for (ssize_t n; (n = read(op[0], buf, sizeof buf)) > 0;) r.out.append(buf, (size_t)n);
+    close(op[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    r.code = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+  }
+  posix_spawn_file_actions_destroy(&fa);
+  return r;
+}
+#endif
+
+Run run(const Args& a, const std::string& in = {}, bool askpass = false) {
+  if (askpass) {
+    set_env("FRAMEY_ASKPASS", "1");
+    set_env("FRAMEY_PW", g_pw.c_str());
+    set_env("SSH_ASKPASS", self().c_str());
+    set_env("SSH_ASKPASS_REQUIRE", "force");
+  }
+  Run r = run_raw(a, in);
   if (askpass)
-    for (auto v : {"FRAMEY_ASKPASS", "FRAMEY_PW", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"}) SetEnvironmentVariableA(v, nullptr);
+    for (auto k : {"FRAMEY_ASKPASS", "FRAMEY_PW", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"}) set_env(k, nullptr);
   return r;
 }
 
+bool have(const std::string& tool) {
+  const char* path = std::getenv("PATH");
+  if (!path) return false;
+#ifdef _WIN32
+  const char sep = ';';
+  const char* ext = ".exe";
+#else
+  const char sep = ':';
+  const char* ext = "";
+#endif
+  std::istringstream in(path);
+  std::error_code ec;
+  for (std::string d; std::getline(in, d, sep);)
+    if (!d.empty() && fs::exists(fs::path(d) / (tool + ext), ec)) return true;
+  return false;
+}
+
 std::string trim(std::string s) {
-  while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
-  return s;
+  while (!s.empty() && isspace((unsigned char)s.back())) s.pop_back();
+  size_t i = 0;
+  while (i < s.size() && isspace((unsigned char)s[i])) i++;
+  return s.substr(i);
 }
 
 std::string tail(const std::string& s, size_t lines = 4) {
@@ -145,26 +244,26 @@ std::string tail(const std::string& s, size_t lines = 4) {
   return out;
 }
 
-std::string ssh_opts() {
-  return std::format("-i \"{}\" -o IdentitiesOnly=yes -o UserKnownHostsFile=\"{}\" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=12",
-                     (g_dir / "id_ed25519").string(), (g_dir / "known_hosts").string());
+std::string path_opt(const char* name, const fs::path& p) {
+  std::string s = p.string();
+  return std::string(name) + "=" + (s.find(' ') == std::string::npos ? s : "\"" + s + "\"");
+}
+
+Args ssh_base() {
+  return {"-i", (g_dir / "id_ed25519").string(), "-o", "IdentitiesOnly=yes", "-o", path_opt("UserKnownHostsFile", g_dir / "known_hosts"), "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=12"};
 }
 
 Run ssh(const std::string& remote, const std::string& in = {}) {
-  return run(std::format("ssh {} -o BatchMode=yes steamos@{} \"{}\"", ssh_opts(), g_target, remote), in);
-}
-
-bool valid_host(const std::string& h) {
-  if (h.empty() || h.size() > 100) return false;
-  for (char c : h)
-    if (!isalnum((unsigned char)c) && c != '.' && c != '-' && c != ':') return false;
-  return true;
+  Args a{"ssh"};
+  for (auto& x : ssh_base()) a.push_back(x);
+  for (auto& x : Args{"-o", "BatchMode=yes", "steamos@" + g_target, remote}) a.push_back(x);
+  return run(a, in);
 }
 
 bool need_tools() {
   for (const char* t : {"ssh", "scp", "ssh-keygen", "tar", "curl"})
-    if (run(std::format("where {}", t)).code) {
-      log(std::format("Missing Windows tool: {}.exe. Turn on the OpenSSH Client in Windows optional features.", t));
+    if (!have(t)) {
+      log(std::format("Missing tool: {}. Install the OpenSSH client, curl and tar for your system.", t));
       return false;
     }
   return true;
@@ -172,7 +271,7 @@ bool need_tools() {
 
 bool authorize() {
   if (!fs::exists(g_dir / "id_ed25519")) {
-    run(std::format("ssh-keygen -q -t ed25519 -N \"\" -C framey-app -f \"{}\"", (g_dir / "id_ed25519").string()));
+    run({"ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "framey-app", "-f", (g_dir / "id_ed25519").string()});
     if (!fs::exists(g_dir / "id_ed25519")) return log("Could not create an SSH key."), false;
   }
   if (!ssh("true").code) return true;
@@ -182,8 +281,7 @@ bool authorize() {
   std::string pub;
   std::getline(f, pub);
   pub = trim(pub);
-  auto r = run(std::format("ssh -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o UserKnownHostsFile=\"{}\" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=12 steamos@{} \"sh -s\"",
-                           (g_dir / "known_hosts").string(), g_target),
+  auto r = run({"ssh", "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1", "-o", path_opt("UserKnownHostsFile", g_dir / "known_hosts"), "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=12", "steamos@" + g_target, "sh -s"},
                std::format("umask 077\nmkdir -p ~/.ssh\ntouch ~/.ssh/authorized_keys\ngrep -qxF '{0}' ~/.ssh/authorized_keys || echo '{0}' >> ~/.ssh/authorized_keys\n", pub), true);
   if (r.code || ssh("true").code) {
     log("Could not log in. Check the address and the password you set in Developer settings.\n" + tail(r.out));
@@ -193,20 +291,25 @@ bool authorize() {
 }
 
 std::string latest_sha(const std::string& repo) {
-  auto r = run(std::format("curl -fsSL --max-time 20 -H \"Accept: application/vnd.github.sha\" https://api.github.com/repos/{}/{}/commits/main", kOwner, repo));
+  auto r = run({"curl", "-fsSL", "--max-time", "20", "-H", "Accept: application/vnd.github.sha", std::format("https://api.github.com/repos/{}/{}/commits/main", kOwner, repo)});
   auto s = trim(r.out);
   return !r.code && s.size() == 40 ? s : "";
 }
 
-bool bundled() { return FindResourceA(nullptr, "PAYLOAD", RT_RCDATA) != nullptr; }
-
-bool unpack_bundle(fs::path to) {
-  HRSRC h = FindResourceA(nullptr, "PAYLOAD", RT_RCDATA);
-  if (!h) return false;
-  HGLOBAL g = LoadResource(nullptr, h);
+bool extract(const fs::path& archive, const fs::path& to, bool strip = false) {
   fs::create_directories(to);
-  std::ofstream(to / "payload.tar", std::ios::binary).write((const char*)LockResource(g), SizeofResource(nullptr, h));
-  return !run(std::format("tar -xf \"{}\" -C \"{}\"", (to / "payload.tar").string(), to.string())).code;
+  Args a{"tar", "-xf", archive.string(), "-C", to.string()};
+  if (strip) a.insert(a.end(), {"--strip-components", "1"});
+  if (!run(a).code) return true;
+  if (strip) return false;
+  if (have("bsdtar") && !run({"bsdtar", "-xf", archive.string(), "-C", to.string()}).code) return true;
+  return have("unzip") && !run({"unzip", "-qo", archive.string(), "-d", to.string()}).code;
+}
+
+bool unpack_bundle(const fs::path& to) {
+  fs::create_directories(to);
+  std::ofstream(to / "payload.tgz", std::ios::binary).write((const char*)kPayload, sizeof kPayload);
+  return extract(to / "payload.tgz", to);
 }
 
 std::string stage(const std::string& repo, const fs::path& root) {
@@ -215,17 +318,16 @@ std::string stage(const std::string& repo, const fs::path& root) {
   fs::create_directories(dest);
   auto tgz = (root / (repo + ".tar.gz")).string();
   std::string sha = latest_sha(repo);
-  if (!sha.empty() &&
-      !run(std::format("curl -fsSL --max-time 60 -o \"{}\" https://github.com/{}/{}/archive/refs/heads/main.tar.gz", tgz, kOwner, repo)).code &&
-      !run(std::format("tar -xzf \"{}\" -C \"{}\" --strip-components 1", tgz, dest.string())).code) {
+  if (!sha.empty() && !run({"curl", "-fsSL", "--max-time", "60", "-o", tgz, std::format("https://github.com/{}/{}/archive/refs/heads/main.tar.gz", kOwner, repo)}).code &&
+      extract(tgz, dest, true)) {
     std::ofstream(dest / ".version") << sha;
     log(std::format("{}: downloaded from GitHub ({})", repo, sha.substr(0, 7)));
     return sha;
   }
   fs::remove_all(dest);
-  fs::path bundle = g_dir / "bundle";
+  fs::path bundle = g_work / "bundle";
   fs::remove_all(bundle);
-  if (!bundled() || !unpack_bundle(bundle) || !fs::exists(bundle / repo)) return log(std::format("{}: GitHub is unreachable and there is no bundled copy.", repo)), "";
+  if (!unpack_bundle(bundle) || !fs::exists(bundle / repo)) return log(std::format("{}: GitHub is unreachable and the bundled copy could not be opened.", repo)), "";
   fs::copy(bundle / repo, dest, fs::copy_options::recursive);
   std::ifstream v(dest / ".version");
   std::string s;
@@ -234,9 +336,116 @@ std::string stage(const std::string& repo, const fs::path& root) {
   return s.empty() ? "bundled" : s;
 }
 
-void upload(const std::string& repo, const fs::path& root) {
-  auto r = run(std::format("scp -r -q -o BatchMode=yes {} \"{}\" steamos@{}:{}/", ssh_opts(), (root / repo).string(), g_target, kHome));
-  if (r.code) throw std::runtime_error("upload failed\n" + tail(r.out));
+bool upload(const fs::path& local, const std::string& remote_dir) {
+  Args a{"scp", "-r", "-q", "-o", "BatchMode=yes"};
+  for (auto& x : ssh_base()) a.push_back(x);
+  a.push_back(local.string());
+  a.push_back(std::format("steamos@{}:{}/", g_target, remote_dir));
+  auto r = run(a);
+  if (r.code) log("Upload failed.\n" + tail(r.out));
+  return !r.code;
+}
+
+std::string json_str(const std::string& j, const std::string& key) {
+  auto k = j.find("\"" + key + "\"");
+  if (k == std::string::npos) return {};
+  auto q1 = j.find('"', j.find(':', k));
+  auto q2 = q1 == std::string::npos ? q1 : j.find('"', q1 + 1);
+  return q2 == std::string::npos ? "" : j.substr(q1 + 1, q2 - q1 - 1);
+}
+
+std::string slug(const std::string& s) {
+  std::string o;
+  for (char c : s) {
+    c = (char)tolower((unsigned char)c);
+    if (isalnum((unsigned char)c) || c == '_') o += c;
+    else if (!o.empty() && o.back() != '-') o += '-';
+  }
+  while (!o.empty() && o.back() == '-') o.pop_back();
+  return o.substr(0, 32);
+}
+
+bool valid_id(const std::string& s) {
+  if (s.empty() || s.size() > 32) return false;
+  for (char c : s)
+    if (!islower((unsigned char)c) && !isdigit((unsigned char)c) && c != '-' && c != '_') return false;
+  return true;
+}
+
+bool safe_url(const std::string& u) {
+  for (char c : u)
+    if (c <= ' ' || c == '\'' || c == '"' || c == '`' || c == '\\' || c == '<' || c == '>' || c == '|') return false;
+  return true;
+}
+
+bool install_plugin(std::string src, bool restart) {
+  if (src.size() > 1 && src.front() == '"' && src.back() == '"') src = src.substr(1, src.size() - 2);
+  fs::path work = g_work / ("plugin-" + std::to_string(std::hash<std::string>{}(src) % 100000));
+  fs::remove_all(work);
+  fs::create_directories(work / "x");
+  fs::path archive = work / "plugin.pkg";
+  std::string hint, url;
+  std::error_code ec;
+  if (fs::is_regular_file(src, ec)) {
+    if (fs::file_size(src) > 20'000'000) return log("That file is over 20 MB."), false;
+    fs::copy_file(src, archive);
+    hint = fs::path(src).stem().string();
+  } else {
+    url = src;
+    if (url.starts_with("https://github.com/")) {
+      std::string path = url.substr(19);
+      path = path.substr(0, path.find_first_of("?#"));
+      std::vector<std::string> p;
+      std::istringstream in(path);
+      for (std::string part; std::getline(in, part, '/');)
+        if (!part.empty()) p.push_back(part);
+      if (p.size() < 2) return log("That GitHub link needs an owner and a repo, like github.com/owner/repo."), false;
+      hint = p[1].ends_with(".git") ? p[1].substr(0, p[1].size() - 4) : p[1];
+      bool direct = path.find("/archive/") != std::string::npos || path.find("/releases/download/") != std::string::npos || path.ends_with(".zip") || path.ends_with(".tar.gz");
+      if (!direct) url = std::format("https://github.com/{}/{}/archive/{}.tar.gz", p[0], hint, p.size() >= 4 && p[2] == "tree" ? "refs/heads/" + p[3] : "HEAD");
+    } else if (url.starts_with("https://") && (url.ends_with(".zip") || url.ends_with(".tar.gz"))) {
+      hint = fs::path(url.substr(url.find_last_of('/') + 1)).stem().string();
+    } else {
+      return log("Use a .zip file, a github.com link, or an https link to a .zip."), false;
+    }
+    if (!safe_url(url)) return log("That link has characters that are not allowed."), false;
+    log("Downloading the plugin...");
+    auto r = run({"curl", "-fsSL", "--max-time", "90", "--max-filesize", "20000000", "-o", archive.string(), url});
+    if (r.code) return log("Download failed. Check the link.\n" + tail(r.out)), false;
+  }
+  if (!extract(archive, work / "x")) return log("Could not open that package. It must be a .zip or .tar.gz."), false;
+  fs::path root = work / "x";
+  if (!fs::exists(root / "plugin.json")) {
+    std::vector<fs::path> dirs;
+    for (auto& e : fs::directory_iterator(root))
+      if (e.is_directory()) dirs.push_back(e.path());
+    if (dirs.size() != 1 || !fs::exists(dirs[0] / "plugin.json")) return log("No plugin.json at the top of that package. A Framey plugin has plugin.json plus main.js and/or backend.py."), false;
+    root = dirs[0];
+  }
+  if (!fs::exists(root / "main.js") && !fs::exists(root / "backend.py")) return log("That plugin has neither main.js nor backend.py."), false;
+  std::ifstream mf(root / "plugin.json");
+  std::string manifest((std::istreambuf_iterator<char>(mf)), {});
+  std::string id = json_str(manifest, "id"), name = json_str(manifest, "name");
+  if (!valid_id(id)) id = slug(hint);
+  if (!valid_id(id)) return log("Could not work out a plugin id. Add an \"id\" to its plugin.json (lowercase letters, digits, - and _)."), false;
+  fs::path stage_dir = work / "stage" / id;
+  fs::create_directories(stage_dir.parent_path());
+  fs::copy(root, stage_dir, fs::copy_options::recursive);
+  fs::remove_all(stage_dir / ".git");
+  if (!url.empty()) std::ofstream(stage_dir / ".source") << url;
+  log(std::format("Installing plugin {} ({}) on the headset...", name.empty() ? id : name, id));
+  auto r = ssh("sh -s", std::format("[ -L {0}/framey/plugins/{1} ] && exit 3\nmkdir -p {0}/framey/plugins\nrm -rf {0}/framey/plugins/{1}\n"
+                                    "python3 -c \"import json,os;p=os.path.expanduser('~/.config/framey/settings.json');s=json.load(open(p));s['disabled']=[x for x in s.get('disabled',[]) if x!='{1}'];json.dump(s,open(p,'w'))\" 2>/dev/null || true\n",
+                                    kHome, id));
+  if (r.code == 3) return log("A linked plugin with that id is already there (for example Fan Control). Remove it first."), false;
+  if (r.code) return log("Could not prepare the plugins folder.\n" + tail(r.out)), false;
+  if (!upload(stage_dir, std::format("{}/framey/plugins", kHome))) return false;
+  if (restart) {
+    r = ssh(std::format("systemctl --user restart framey.service && sleep 2 && systemctl --user is-active framey.service && test -f {}/framey/plugins/{}/plugin.json && echo plugin-in-place", kHome, id));
+    if (r.out.find("plugin-in-place") == std::string::npos) return log("The plugin was copied but Framey did not restart cleanly.\n" + tail(r.out)), false;
+  }
+  log(std::format("Plugin {} is installed.", id));
+  return true;
 }
 
 const char* kService =
@@ -244,289 +453,343 @@ const char* kService =
     "ExecStart=/usr/bin/python3 /home/steamos/framey/framey.py\nRestart=always\nRestartSec=3\nNice=19\n"
     "CPUSchedulingPolicy=idle\nCPUWeight=1\nMemoryHigh=40M\nMemoryMax=60M\n\n[Install]\nWantedBy=default.target\n";
 
-void install(bool fan) {
-  if (!need_tools()) return;
-  fs::create_directories(g_dir);
-  log("[1/5] Connecting to the headset...");
+void do_install() {
+  log("[1/6] Connecting to the headset...");
   if (!authorize()) return;
-  fs::path root = g_dir / "stage";
+  fs::path root = g_work / "stage";
   fs::create_directories(root);
   std::vector<std::string> repos = {"framey"};
-  if (fan) repos.push_back("frame-fan");
-  log("[2/5] Getting the latest versions...");
+  if (g_fan) repos.push_back("frame-fan");
+  log("[2/6] Getting the latest versions...");
   for (auto& r : repos)
     if (stage(r, root).empty()) return;
-  log("[3/5] Copying files to the headset...");
-  for (auto& r : repos) upload(r, root);
-  log("[4/5] Setting up Framey...");
+  log("[3/6] Copying files to the headset...");
+  for (auto& r : repos)
+    if (!upload(root / r, kHome)) return;
+  log("[4/6] Setting up Framey...");
   std::string script = "set -e\ncd /home/steamos\nmkdir -p framey/plugins .config/systemd/user\ncat > .config/systemd/user/framey.service <<'EOT'\n";
   script += kService;
   script += "EOT\n";
-  if (fan) script += "ln -sfn /home/steamos/frame-fan framey/plugins/fan\n";
+  if (g_fan) script += "ln -sfn /home/steamos/frame-fan framey/plugins/fan\n";
   script += "systemctl --user daemon-reload\nsystemctl --user enable framey.service\nsystemctl --user restart framey.service\n";
   auto r = ssh("sh -s", script);
   if (r.code) return log("Framey setup failed.\n" + tail(r.out));
-  if (fan) {
+  if (g_fan) {
     if (g_pw.empty()) return log("Fan Control needs the headset password for its system step. Enter it and run Install again.");
-    log("[5/5] Installing Fan Control (about 20 seconds)...");
+    log("[5/6] Installing Fan Control (about 20 seconds)...");
     r = ssh(std::format("sudo -S -p '' bash {}/frame-fan/install-root.sh", kHome), g_pw + "\n");
     if (r.code) return log("Fan Control install failed. Is the password right?\n" + tail(r.out));
     log(tail(r.out, 3));
   }
+  log("[6/6] Updating plugins installed from links...");
+  r = ssh(std::format("for d in {0}/framey/plugins/*/; do d=${{d%/}}; [ -L \"$d\" ] && continue; [ -f \"$d/.source\" ] && echo \"$(cat \"$d/.source\")\"; done", kHome));
+  std::istringstream list(r.out);
+  int updated = 0;
+  for (std::string u; std::getline(list, u);)
+    if (!trim(u).empty() && install_plugin(trim(u), false)) updated++;
+  if (updated) ssh("systemctl --user restart framey.service");
   r = ssh("systemctl --user is-active framey.service; ss -ltn 2>/dev/null | grep -q ':8080 ' && echo debug-port-open || echo debug-port-closed");
-  std::string o = r.out;
-  if (o.find("debug-port-closed") != std::string::npos)
-    log("Warning: Steam's debug port is not open. Make sure Steam is running on the headset.");
-  if (o.find("active") != 0 && o.find("\nactive") == std::string::npos) return log("Framey is not running.\n" + tail(o));
+  if (r.out.find("debug-port-closed") != std::string::npos) log("Warning: Steam's debug port is not open. Make sure Steam is running on the headset.");
+  if (r.out.find("active") != 0 && r.out.find("\nactive") == std::string::npos) return log("Framey is not running.\n" + tail(r.out));
   log("\nDone. Put the headset on and tap the Framey icon in the bottom bar.");
-  post(WM_STATUS, "Installed.");
+  status("Installed.");
 }
 
-void check() {
-  if (!need_tools()) return;
-  fs::create_directories(g_dir);
+void do_check() {
   if (!authorize()) return;
   auto r = ssh("for r in framey frame-fan; do echo $r=$(cat /home/steamos/$r/.version 2>/dev/null); done");
-  std::string status;
+  std::string all;
   for (auto repo : kRepos) {
     auto at = r.out.find(std::string(repo) + "=");
-    std::string have;
+    std::string have_v;
     if (at != std::string::npos) {
-      have = r.out.substr(at + strlen(repo) + 1, 40);
-      if (have.find_first_of("\r\n") != std::string::npos) have.clear();
+      have_v = r.out.substr(at + strlen(repo) + 1, 40);
+      if (have_v.find_first_of("\r\n") != std::string::npos) have_v.clear();
     }
     std::string now = latest_sha(repo);
-    std::string line = std::format("{}: {}, latest {}", repo, have.empty() ? "not installed" : have.substr(0, 7), now.empty() ? "unknown" : now.substr(0, 7));
-    if (!have.empty() && !now.empty()) line += have == now ? " (up to date)" : " (update available)";
+    std::string line = std::format("{}: {}, latest {}", repo, have_v.empty() ? "not installed" : have_v.substr(0, 7), now.empty() ? "unknown" : now.substr(0, 7));
+    if (!have_v.empty() && !now.empty()) line += have_v == now ? " (up to date)" : " (update available)";
     log(line);
-    status += line + "   ";
+    all += line + "   ";
   }
-  post(WM_STATUS, status);
+  status(all);
 }
 
-void remove_all_of_it() {
-  if (!need_tools() || !authorize()) return;
-  if (g_pw.empty()) return log("Removing Fan Control needs the headset password. Enter it and try again.");
-  log("Removing Fan Control (restores stock fan control)...");
-  auto r = ssh(std::format("test -f {0}/frame-fan/uninstall-root.sh && sudo -S -p '' bash {0}/frame-fan/uninstall-root.sh", kHome), g_pw + "\n");
-  log(tail(r.out, 2));
-  log("Removing Framey...");
+void do_remove() {
+  if (!authorize()) return;
+  Run r;
+  if (!ssh(std::format("test -f {}/frame-fan/uninstall-root.sh", kHome)).code) {
+    if (g_pw.empty()) return log("Fan Control is installed, and removing it needs the headset password. Enter it and try again.");
+    log("Removing Fan Control (restores stock fan control)...");
+    r = ssh(std::format("sudo -S -p '' bash {}/frame-fan/uninstall-root.sh", kHome), g_pw + "\n");
+    log(tail(r.out, 2));
+  }
+  log("Removing Framey and its plugins...");
   r = ssh("sh -s", "systemctl --user disable --now framey.service\nrm -f ~/.config/systemd/user/framey.service\nsystemctl --user daemon-reload\nrm -rf ~/framey ~/frame-fan ~/.config/framey ~/.config/frame-fan\n");
-  log(r.code ? "Removal had errors.\n" + tail(r.out) : "Done. Everything the app installed is removed.");
-  post(WM_STATUS, "Removed.");
+  if (r.code) return log("Removal had errors.\n" + tail(r.out));
+  log("Removing this app's key from the headset...");
+  r = ssh("sed -i '/ framey-app$/d' ~/.ssh/authorized_keys");
+  if (r.code) return log("Could not remove the app's key.\n" + tail(r.out));
+  std::error_code ec;
+  fs::remove_all(g_dir, ec);
+  log("Done. The headset and this computer are clean: the app's key, settings and temporary files are gone too.");
+  status("Removed.");
 }
 
-void start(void (*job)(bool), bool arg) {
-  g_target = trim(text(g_host));
-  g_pw = text(g_pass);
-  if (!valid_host(g_target)) return (void)MessageBoxA(g_wnd, "Enter the headset address, for example frame or its IP address.", "Framey App", MB_ICONINFORMATION);
+bool valid_host(const std::string& h) {
+  if (h.empty() || h.size() > 100) return false;
+  for (char c : h)
+    if (!isalnum((unsigned char)c) && c != '.' && c != '-' && c != ':') return false;
+  return true;
+}
+
+std::string upload_path() { return (fs::temp_directory_path() / std::format("FrameyUpload-{}.pkg", std::hash<std::string>{}(g_token) % 1000000)).string(); }
+
+void start_job(const std::string& action, const std::string& host, const std::string& pw, bool fan, const std::string& source) {
   if (g_busy.exchange(true)) return;
-  for (HWND b : g_buttons) EnableWindow(b, FALSE);
+  if (!valid_host(trim(host))) {
+    log("Enter the headset address, for example frame or its IP address.");
+    g_busy = false;
+    return;
+  }
+  g_target = trim(host);
+  g_pw = pw;
+  g_fan = fan;
+  g_source = trim(source);
+  g_work = fs::temp_directory_path() / std::format("FrameyApp-{}", std::hash<std::string>{}(g_token) % 1000000);
   fs::create_directories(g_dir);
   std::ofstream(g_dir / "host.txt") << g_target;
-  std::thread([job, arg] {
+  status("Working...");
+  std::thread([action] {
     try {
-      job(arg);
+      if (!need_tools()) {
+      } else if (action == "install") {
+        do_install();
+      } else if (action == "check") {
+        do_check();
+      } else if (action == "remove") {
+        do_remove();
+      } else if (action == "plugin") {
+        if (g_source.empty()) log("Choose a .zip file or paste a GitHub link first.");
+        else if (authorize()) {
+          if (ssh(std::format("test -d {}/framey", kHome)).code) log("Framey is not installed on the headset yet. Click Install / Update first.");
+          else if (install_plugin(g_source, true)) status("Plugin installed.");
+        }
+      }
     } catch (const std::exception& e) {
       log(std::string("Error: ") + e.what());
     }
     g_pw.assign(g_pw.size(), '\0');
+    g_pw.clear();
+    std::error_code ec;
+    fs::remove_all(g_work, ec);
+    fs::remove(upload_path(), ec);
+    {
+      std::lock_guard l(g_mu);
+      if (g_status == "Working...") g_status.clear();
+    }
     g_busy = false;
-    PostMessageA(g_wnd, WM_DONE, 0, 0);
   }).detach();
 }
 
-HWND make(const char* cls, const char* label, DWORD style, int x, int y, int w, int h, int id = 0, DWORD ex = 0) {
-  HWND c = CreateWindowExA(ex, cls, label, WS_CHILD | WS_VISIBLE | style, S(x), S(y), S(w), S(h), g_wnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
-  SendMessageA(c, WM_SETFONT, (WPARAM)g_font, TRUE);
-  return c;
-}
-
-LRESULT CALLBACK proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
-  switch (m) {
-    case WM_CREATE: {
-      g_wnd = w;
-      g_font = CreateFontA(-S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Consolas");
-      g_big = CreateFontA(-S(30), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Consolas");
-      g_title = make("STATIC", "FRAMEY", SS_LEFT, 24, 14, 300, 44);
-      SendMessageA(g_title, WM_SETFONT, (WPARAM)g_big, TRUE);
-      for (int i = 0; i < 4; i++) g_swatches[i] = make("BUTTON", kThemes[i].name, BS_OWNERDRAW, 424 + i * 38, 22, 30, 30, ID_SWATCH + i);
-      make("STATIC",
-           "Before you start, on the headset:\r\n"
-           "1.  Steam Settings > System > Enable Developer Mode.\r\n"
-           "2.  Developer (left menu) > scroll to the bottom > Set User Password.\r\n"
-           "3.  Keep the headset awake and on the same network as this PC.\r\n\r\n"
-           "Then enter its address and password and click Install. The password is needed the first time and for Fan Control, and is never saved.",
-           SS_LEFT, 24, 66, 552, 148);
-      make("STATIC", "Headset address", SS_LEFT, 24, 222, 250, 20);
-      g_host = make("EDIT", "frame", ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER, 24, 244, 260, 28, ID_HOST);
-      make("STATIC", "Password (never saved)", SS_LEFT, 300, 222, 276, 20);
-      g_pass = make("EDIT", "", ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP | WS_BORDER, 300, 244, 276, 28, ID_PASS);
-      g_fan = make("BUTTON", "Also install Fan Control", BS_OWNERDRAW | WS_TABSTOP, 24, 284, 400, 24, ID_FAN);
-      g_buttons[0] = make("BUTTON", "Install / Update", BS_OWNERDRAW | WS_TABSTOP, 24, 320, 170, 36, ID_INSTALL);
-      g_buttons[1] = make("BUTTON", "Check for updates", BS_OWNERDRAW | WS_TABSTOP, 204, 320, 190, 36, ID_CHECK);
-      g_buttons[2] = make("BUTTON", "Remove", BS_OWNERDRAW | WS_TABSTOP, 404, 320, 172, 36, ID_REMOVE);
-      g_status = make("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, 24, 366, 552, 22, ID_STATUS);
-      g_log = make("EDIT", "", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, 24, 394, 552, 250, ID_LOG);
-      std::ifstream f(g_dir / "host.txt");
-      std::string h;
-      if (std::getline(f, h) && !h.empty()) SetWindowTextA(g_host, h.c_str());
-      apply_theme(g_theme);
-      return 0;
-    }
-    case WM_DRAWITEM: {
-      auto* d = (DRAWITEMSTRUCT*)lp;
-      int id = (int)d->CtlID;
-      bool down = d->itemState & ODS_SELECTED, off = d->itemState & ODS_DISABLED;
-      HDC dc = d->hDC;
-      RECT r = d->rcItem;
-      COLORREF edge = off ? T().field : T().accent;
-      auto frame = [&](COLORREF c, int px) {
-        HBRUSH b = CreateSolidBrush(c);
-        for (int i = 0; i < px; i++) {
-          FrameRect(dc, &r, b);
-          InflateRect(&r, -1, -1);
-        }
-        DeleteObject(b);
-      };
-      auto fill = [&](COLORREF c) {
-        HBRUSH b = CreateSolidBrush(c);
-        FillRect(dc, &r, b);
-        DeleteObject(b);
-      };
-      SelectObject(dc, g_font);
-      SetBkMode(dc, TRANSPARENT);
-      if (id >= ID_SWATCH) {
-        const Theme& t = kThemes[id - ID_SWATCH];
-        fill(t.bg);
-        frame(id - ID_SWATCH == g_theme ? T().text : t.text, id - ID_SWATCH == g_theme ? 3 : 1);
-        InflateRect(&r, -2, -2);
-        fill(t.accent);
-      } else if (id == ID_FAN) {
-        fill(T().bg);
-        RECT box{r.left, r.top + 3, r.left + S(18), r.top + 3 + S(18)};
-        r = box;
-        frame(T().accent, 2);
-        if (g_fan_on) fill(T().accent);
-        RECT label = d->rcItem;
-        label.left += S(28);
-        SetTextColor(dc, T().text);
-        DrawTextA(dc, "Also install Fan Control", -1, &label, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-      } else {
-        fill(down ? T().accent : T().bg);
-        frame(edge, 2);
-        char label[64];
-        GetWindowTextA(d->hwndItem, label, sizeof label);
-        SetTextColor(dc, off ? T().field : down ? T().bg : T().accent);
-        RECT tr = d->rcItem;
-        DrawTextA(dc, label, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
-      }
-      return TRUE;
-    }
-    case WM_COMMAND:
-      if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) >= ID_SWATCH) {
-        apply_theme(LOWORD(wp) - ID_SWATCH);
-        return 0;
-      }
-      if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == ID_FAN) {
-        g_fan_on = !g_fan_on;
-        InvalidateRect(g_fan, nullptr, TRUE);
-        return 0;
-      }
-      if (HIWORD(wp) == BN_CLICKED && !g_busy) {
-        bool fan = g_fan_on;
-        switch (LOWORD(wp)) {
-          case ID_INSTALL: start(install, fan); break;
-          case ID_CHECK: start([](bool) { check(); }, false); break;
-          case ID_REMOVE:
-            if (MessageBoxA(w, "Remove Framey and Fan Control from the headset, with their saved settings?", "Framey App", MB_YESNO | MB_ICONWARNING) == IDYES)
-              start([](bool) { remove_all_of_it(); }, false);
-            break;
-        }
-      }
-      return 0;
-    case WM_LOG: {
-      std::unique_ptr<std::string> s((std::string*)lp);
-      std::string t;
-      for (char c : *s) {
-        if (c == '\n') t += '\r';
-        t += c;
-      }
-      SendMessageA(g_log, EM_SETSEL, -1, -1);
-      SendMessageA(g_log, EM_REPLACESEL, FALSE, (LPARAM)(t + "\r\n").c_str());
-      return 0;
-    }
-    case WM_STATUS: {
-      std::unique_ptr<std::string> s((std::string*)lp);
-      SetWindowTextA(g_status, s->c_str());
-      return 0;
-    }
-    case WM_DONE:
-      for (HWND b : g_buttons) EnableWindow(b, TRUE);
-      SetWindowTextA(g_pass, "");
-      return 0;
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLORBTN:
-      SetTextColor((HDC)wp, (HWND)lp == g_title || (HWND)lp == g_status ? T().accent : T().text);
-      SetBkColor((HDC)wp, T().bg);
-      return (LRESULT)g_bg;
-    case WM_CTLCOLOREDIT:
-      SetTextColor((HDC)wp, T().text);
-      SetBkColor((HDC)wp, T().field);
-      return (LRESULT)g_field;
-    case WM_ERASEBKGND: {
-      RECT r;
-      GetClientRect(w, &r);
-      FillRect((HDC)wp, &r, g_bg);
-      return 1;
-    }
-    case WM_DESTROY:
-      PostQuitMessage(0);
-      return 0;
+std::string url_decode(const std::string& s) {
+  std::string o;
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] == '+') o += ' ';
+    else if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) o += (char)std::stoi(s.substr(i + 1, 2), nullptr, 16), i += 2;
+    else o += s[i];
   }
-  return DefWindowProcA(w, m, wp, lp);
+  return o;
 }
 
-int askpass_mode() {
-  char pw[512] = {};
-  GetEnvironmentVariableA("FRAMEY_PW", pw, sizeof pw);
-  std::string prompt = GetCommandLineA();
-  for (auto& c : prompt) c = (char)tolower((unsigned char)c);
-  std::string reply = prompt.find("assword") != std::string::npos ? std::string(pw) + "\n" : "yes\n";
-  DWORD n;
-  WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), reply.data(), (DWORD)reply.size(), &n, nullptr);
-  return 0;
+std::map<std::string, std::string> form(const std::string& body) {
+  std::map<std::string, std::string> m;
+  std::istringstream in(body);
+  for (std::string kv; std::getline(in, kv, '&');) {
+    auto eq = kv.find('=');
+    if (eq != std::string::npos) m[url_decode(kv.substr(0, eq))] = url_decode(kv.substr(eq + 1));
+  }
+  return m;
 }
 
-int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int show) {
-  if (GetEnvironmentVariableA("FRAMEY_ASKPASS", nullptr, 0)) return askpass_mode();
-  char appdata[MAX_PATH];
-  GetEnvironmentVariableA("LOCALAPPDATA", appdata, sizeof appdata);
-  g_dir = fs::path(appdata) / "Framey";
-  g_dpi = (int)GetDpiForSystem();
-  std::ifstream tf(g_dir / "theme.txt");
-  int saved = -1;
-  if (tf >> saved && saved >= 0 && saved < 4) g_theme = saved;
-  apply_theme(g_theme);
-  INITCOMMONCONTROLSEX cc{sizeof cc, ICC_STANDARD_CLASSES};
-  InitCommonControlsEx(&cc);
-  WNDCLASSA wc{};
-  wc.lpfnWndProc = proc;
-  wc.hInstance = inst;
-  wc.lpszClassName = "FrameyApp";
-  wc.hCursor = LoadCursorA(nullptr, IDC_ARROW);
-  wc.hIcon = LoadIconA(inst, MAKEINTRESOURCEA(1));
-  RegisterClassA(&wc);
-  RECT r{0, 0, S(600), S(664)};
-  DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-  AdjustWindowRect(&r, style, FALSE);
-  HWND w = CreateWindowA("FrameyApp", "Framey App", style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
-  ShowWindow(w, show);
-  MSG msg;
-  while (GetMessageA(&msg, nullptr, 0, 0))
-    if (!IsDialogMessageA(w, &msg)) {
-      TranslateMessage(&msg);
-      DispatchMessageA(&msg);
+std::string jstr(const std::string& s) {
+  std::string o = "\"";
+  for (unsigned char c : s) {
+    if (c == '"' || c == '\\') o += std::string("\\") + (char)c;
+    else if (c == '\n') o += "\\n";
+    else if (c < 32) o += ' ';
+    else o += (char)c;
+  }
+  return o + "\"";
+}
+
+struct Req {
+  std::string method, path, query, body;
+  std::map<std::string, std::string> h;
+};
+
+bool read_req(Sock c, Req& r) {
+  std::string buf;
+  char tmp[8192];
+  size_t end;
+  while ((end = buf.find("\r\n\r\n")) == std::string::npos) {
+    int n = (int)recv(c, tmp, sizeof tmp, 0);
+    if (n <= 0 || buf.size() > 65536) return false;
+    buf.append(tmp, (size_t)n);
+  }
+  std::istringstream in(buf.substr(0, end));
+  std::string line, target, ver;
+  std::getline(in, line);
+  std::istringstream rl(line);
+  rl >> r.method >> target >> ver;
+  auto q = target.find('?');
+  r.path = target.substr(0, q);
+  if (q != std::string::npos) r.query = target.substr(q + 1);
+  while (std::getline(in, line)) {
+    auto colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    std::string k = line.substr(0, colon);
+    std::transform(k.begin(), k.end(), k.begin(), [](unsigned char ch) { return (char)tolower(ch); });
+    r.h[k] = trim(line.substr(colon + 1));
+  }
+  size_t len = r.h.count("content-length") ? std::strtoull(r.h["content-length"].c_str(), nullptr, 10) : 0;
+  if (len > 26'000'000) return false;
+  r.body = buf.substr(end + 4);
+  while (r.body.size() < len) {
+    int n = (int)recv(c, tmp, sizeof tmp, 0);
+    if (n <= 0) return false;
+    r.body.append(tmp, (size_t)n);
+  }
+  return true;
+}
+
+void reply(Sock c, int code, const std::string& type, const std::string& body) {
+  std::string out = std::format(
+      "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+      "Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n",
+      code, code == 200 ? "OK" : "Forbidden", type, body.size()) + body;
+  for (size_t off = 0; off < out.size();) {
+    int n = (int)send(c, out.data() + off, (int)(out.size() - off), 0);
+    if (n <= 0) break;
+    off += (size_t)n;
+  }
+}
+
+std::string saved(const char* file) {
+  std::ifstream f(g_dir / file);
+  std::string s;
+  std::getline(f, s);
+  return trim(s);
+}
+
+void handle(Sock c) {
+  Req r;
+  if (!read_req(c, r)) return;
+  std::string k;
+  if (r.h.count("x-token")) k = r.h["x-token"];
+  else if (r.query.starts_with("k=")) k = r.query.substr(2, r.query.find('&') - 2);
+  std::string host = r.h.count("host") ? r.h["host"] : "";
+  bool local = host == std::format("127.0.0.1:{}", g_port) || host == std::format("localhost:{}", g_port);
+  if (!local || k != g_token) return reply(c, 403, "text/plain", "forbidden");
+  if (r.method == "GET" && r.path == "/") return reply(c, 200, "text/html; charset=utf-8", std::string((const char*)kUi, sizeof kUi));
+  if (r.method == "GET" && r.path == "/api/state") {
+    g_seen = now_s();
+    size_t since = 0;
+    auto at = r.query.find("since=");
+    if (at != std::string::npos) since = std::strtoull(r.query.c_str() + at + 6, nullptr, 10);
+    std::string theme = saved("theme.txt");
+    if (std::find(std::begin(kThemes), std::end(kThemes), theme) == std::end(kThemes)) theme = "Magenta";
+    std::lock_guard l(g_mu);
+    since = std::min(since, g_log.size());
+    return reply(c, 200, "application/json", std::format("{{\"busy\":{},\"status\":{},\"log\":{},\"next\":{},\"theme\":{},\"host\":{}}}", g_busy ? "true" : "false", jstr(g_status), jstr(g_log.substr(since)), g_log.size(), jstr(theme), jstr(saved("host.txt"))));
+  }
+  if (r.method == "POST" && r.path == "/api/run") {
+    auto f = form(r.body);
+    start_job(f["action"], f["host"], f["pw"], f["fan"] == "1", f["source"]);
+    return reply(c, 200, "application/json", "{}");
+  }
+  if (r.method == "POST" && r.path == "/api/upload") {
+    std::ofstream(upload_path(), std::ios::binary).write(r.body.data(), (std::streamsize)r.body.size());
+    return reply(c, 200, "application/json", "{\"path\":" + jstr(upload_path()) + "}");
+  }
+  if (r.method == "POST" && r.path == "/api/theme") {
+    if (std::find(std::begin(kThemes), std::end(kThemes), r.body) != std::end(kThemes)) {
+      fs::create_directories(g_dir);
+      std::ofstream(g_dir / "theme.txt") << r.body;
     }
+    return reply(c, 200, "application/json", "{}");
+  }
+  if (r.method == "POST" && r.path == "/api/quit") {
+    g_quit = true;
+    return reply(c, 200, "application/json", "{}");
+  }
+  reply(c, 403, "text/plain", "forbidden");
+}
+
+void open_url(const std::string& url) {
+#if defined(_WIN32)
+  ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+  run({"open", url});
+#else
+  run({"xdg-open", url});
+#endif
+}
+
+int main(int argc, char** argv) {
+  if (std::getenv("FRAMEY_ASKPASS")) {
+    std::string prompt = argc > 1 ? argv[1] : "";
+    std::transform(prompt.begin(), prompt.end(), prompt.begin(), [](unsigned char ch) { return (char)tolower(ch); });
+    const char* pw = std::getenv("FRAMEY_PW");
+    std::string answer = prompt.find("assword") != std::string::npos ? std::string(pw ? pw : "") + "\n" : "yes\n";
+    std::fwrite(answer.data(), 1, answer.size(), stdout);
+    return 0;
+  }
+#ifdef _WIN32
+  WSADATA wsa;
+  WSAStartup(MAKEWORD(2, 2), &wsa);
+#else
+  signal(SIGPIPE, SIG_IGN);
+#endif
+  g_dir = fs::path(self()).parent_path() / "FrameyApp-data";
+  std::random_device rd;
+  for (int i = 0; i < 4; i++) g_token += std::format("{:08x}", rd());
+  Sock srv = socket(AF_INET, SOCK_STREAM, 0);
+  int yes = 1;
+  setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof yes);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  for (int p = 47321; p < 47341 && !g_port; p++) {
+    addr.sin_port = htons((unsigned short)p);
+    if (bind(srv, (sockaddr*)&addr, sizeof addr) == 0) g_port = p;
+  }
+  if (!g_port || listen(srv, 8)) {
+    std::fputs("Could not open a local port.\n", stderr);
+    return 1;
+  }
+  std::string url = std::format("http://127.0.0.1:{}/?k={}", g_port, g_token);
+  std::printf("Framey App is running. If your browser did not open, go to:\n%s\nPress Ctrl+C or close this window to quit.\n", url.c_str());
+  std::fflush(stdout);
+  g_seen = now_s();
+  if (argc < 2 || std::string(argv[1]) != "--no-browser") open_url(url);
+  while (!g_quit) {
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(srv, &fds);
+    timeval tv{1, 0};
+    if (select((int)srv + 1, &fds, nullptr, nullptr, &tv) > 0) {
+      Sock c = accept(srv, nullptr, nullptr);
+      if (c != (Sock)-1) {
+        handle(c);
+#ifdef _WIN32
+        closesocket(c);
+#else
+        close(c);
+#endif
+      }
+    }
+    if (!g_busy && now_s() - g_seen > 180) break;
+  }
   return 0;
 }

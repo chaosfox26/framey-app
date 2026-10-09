@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Framey App</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+[data-theme=Magenta]{--bg:#14001c;--fd:#2c003c;--tx:#ffdeff;--ac:#ff00c8}
+[data-theme=Blue]{--bg:#00081a;--fd:#001a3c;--tx:#d4e8ff;--ac:#0096ff}
+[data-theme=Black]{--bg:#000;--fd:#181818;--tx:#d6ffd6;--ac:#00ff50}
+[data-theme=White]{--bg:#eeebde;--fd:#fffffa;--tx:#181818;--ac:#181818}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px Consolas,Menlo,"DejaVu Sans Mono",monospace}
+main{max-width:640px;margin:0 auto;padding:24px}
+h1{margin:0;color:var(--ac);font-size:32px;letter-spacing:2px}
+header{display:flex;justify-content:space-between;align-items:center}
+.sw button{width:30px;height:30px;margin-left:8px;border:1px solid var(--tx);cursor:pointer}
+.sw button.on{outline:3px solid var(--tx)}
+ol{padding-left:22px;line-height:1.5}
+label{display:block;margin:14px 0 4px}
+.row{display:flex;gap:12px}.row>div{flex:1}
+input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:7px;background:var(--fd);color:var(--tx);border:1px solid var(--ac);font:inherit}
+button.b{padding:9px 14px;background:var(--bg);color:var(--ac);border:2px solid var(--ac);font:inherit;cursor:pointer}
+button.b:active{background:var(--ac);color:var(--bg)}
+button.b:disabled{opacity:.4;cursor:default}
+.bar{display:flex;gap:10px;margin:16px 0}.bar .b{flex:1}
+input[type=checkbox]{accent-color:var(--ac);margin-right:8px}
+#status{color:var(--ac);min-height:20px;margin:6px 0}
+pre{height:210px;overflow:auto;margin:0;padding:8px;background:var(--fd);border:1px solid var(--ac);white-space:pre-wrap}
+small{opacity:.75}
+</style></head>
+<body data-theme="Magenta"><main>
+<header><h1>FRAMEY</h1><div class="sw" id="sw"></div></header>
+<p>Before you start, on the headset:</p>
+<ol>
+<li>Steam Settings &gt; System &gt; Enable Developer Mode.</li>
+<li>Developer (left menu) &gt; scroll to the bottom &gt; Set User Password.</li>
+<li>Keep the headset awake and on the same network as this computer.</li>
+</ol>
+<p>Then enter its address and password and click Install. The password is needed the first time and for Fan Control, and is never saved.</p>
+<div class="row">
+<div><label for="host">Headset address</label><input type="text" id="host" value="frame" autocomplete="off"></div>
+<div><label for="pw">Password (never saved)</label><input type="password" id="pw" autocomplete="off"></div>
+</div>
+<label><input type="checkbox" id="fan">Also install Fan Control</label>
+<div class="bar">
+<button class="b" id="install">Install / Update</button>
+<button class="b" id="check">Check for updates</button>
+<button class="b" id="remove">Remove</button>
+</div>
+<label for="src">Install a plugin: .zip file or GitHub link</label>
+<div class="row"><div><input type="text" id="src" placeholder="https://github.com/owner/repo" autocomplete="off"></div>
+<button class="b" id="pick">Browse...</button><button class="b" id="add">Add plugin</button></div>
+<input type="file" id="file" accept=".zip,.gz,.tgz" hidden>
+<div id="status"></div>
+<pre id="log"></pre>
+<p><small>Close this tab and the app window to quit, or <a href="#" id="quit" style="color:var(--ac)">quit now</a>.</small></p>
+</main>
+<script>
+const K=new URLSearchParams(location.search).get('k'),$=i=>document.getElementById(i),H={'X-Token':K};
+let since=0,busy=false,first=true,picked=null;
+const NAMES=['Magenta','Blue','Black','White'],COLORS=['#ff00c8','#0096ff','#00ff50','#eeebde'];
+const theme=n=>{document.body.dataset.theme=n;[...$('sw').children].forEach(b=>b.classList.toggle('on',b.title===n))};
+NAMES.forEach((n,i)=>{const b=document.createElement('button');b.title=n;b.style.background=COLORS[i];b.onclick=()=>{theme(n);fetch('/api/theme',{method:'POST',headers:H,body:n})};$('sw').append(b)});
+const lock=b=>['install','check','remove','add','pick'].forEach(i=>$(i).disabled=b);
+async function poll(){
+  try{
+    const s=await(await fetch('/api/state?since='+since,{headers:H})).json();
+    if(first){first=false;theme(s.theme);if(s.host)$('host').value=s.host}
+    if(s.log){const l=$('log');l.textContent+=s.log;l.scrollTop=l.scrollHeight}
+    since=s.next;$('status').textContent=s.status;
+    if(s.busy!==busy){busy=s.busy;lock(busy);if(!busy)$('pw').value=''}
+  }catch(e){}
+  setTimeout(poll,700);
+}
+const run=async(action,extra={})=>{
+  const f=new URLSearchParams({action,host:$('host').value,pw:$('pw').value,fan:$('fan').checked?'1':'0',...extra});
+  await fetch('/api/run',{method:'POST',headers:H,body:f});
+};
+$('install').onclick=()=>run('install');
+$('check').onclick=()=>run('check');
+$('remove').onclick=()=>{if(confirm('Remove Framey and Fan Control from the headset, with their saved settings?'))run('remove')};
+$('pick').onclick=()=>$('file').click();
+$('file').onchange=()=>{picked=$('file').files[0]||null;if(picked)$('src').value=picked.name};
+$('src').oninput=()=>{picked=null};
+$('add').onclick=async()=>{
+  if(!confirm('A plugin runs code on your headset, inside Steam\'s interface. Only install plugins you trust. Continue?'))return;
+  let src=$('src').value;
+  if(picked){const r=await(await fetch('/api/upload',{method:'POST',headers:H,body:picked})).json();src=r.path}
+  run('plugin',{source:src});
+};
+$('quit').onclick=async e=>{e.preventDefault();await fetch('/api/quit',{method:'POST',headers:H});document.body.innerHTML='<main><h1>FRAMEY</h1><p>Closed. You can close this tab.</p></main>'};
+poll();
+</script></body></html>

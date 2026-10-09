@@ -1,0 +1,73 @@
+name: build
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the builds to
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            asset: FrameyApp-windows.exe
+          - os: ubuntu-latest
+            asset: FrameyApp-linux-x86_64.tar.gz
+          - os: ubuntu-24.04-arm
+            asset: FrameyApp-linux-arm64.tar.gz
+          - os: macos-latest
+            asset: FrameyApp-macos.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the repos that get bundled
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/chaosfox26/framey ../Framey
+          git clone --depth 1 https://github.com/chaosfox26/frame-fan ../frame-fan
+          python3 tools/pack.py || python tools/pack.py
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_RC_COMPILER=llvm-rc
+          cmake --build build
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build build
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Package
+        shell: bash
+        run: |
+          mkdir out
+          if [ "$RUNNER_OS" = "Windows" ]; then cp build/FrameyApp.exe out/${{ matrix.asset }}; else tar -czf out/${{ matrix.asset }} -C build FrameyApp; fi
+          ls -l out
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" out/${{ matrix.asset }} --clobber --repo "${{ github.repository }}"
+  sums:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.tag }}" --repo "${{ github.repository }}" --pattern "FrameyApp-*"
+          sha256sum FrameyApp-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "${{ inputs.tag }}" SHA256SUMS.txt --clobber --repo "${{ github.repository }}"
