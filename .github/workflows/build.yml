@@ -67,7 +67,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           cmake --build build
           lipo -info build/FrameyApp
-          lipo -verify_arch build/FrameyApp arm64 x86_64
+          lipo build/FrameyApp -verify_arch arm64 x86_64
       - name: Package
         shell: bash
         run: |
