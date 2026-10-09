@@ -120,6 +120,14 @@ static BOOL ask(NSString* s, NSString* ok) {
   [m addItemWithTitle:@"Quit Framey App" action:@selector(terminate:) keyEquivalent:@"q"];
   mi.submenu = m;
   [bar addItem:mi];
+  NSMenuItem* ei = [NSMenuItem new];
+  NSMenu* em = [[NSMenu alloc] initWithTitle:@"Edit"];
+  [em addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+  [em addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+  [em addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+  [em addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+  ei.submenu = em;
+  [bar addItem:ei];
   NSApp.mainMenu = bar;
 
   _win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 640)
@@ -140,6 +148,7 @@ static BOOL ask(NSString* s, NSString* ok) {
     NSButton* b = button(v, self, @selector(pick:), @"", 472 + i * 38, 24, 30, 30);
     b.tag = i;
     b.toolTip = ns(kThemes[i]);
+    b.accessibilityLabel = ns(kThemes[i]);
     [_sw addObject:b];
   }
   [_labels addObject:label(v, @"Before you start, on the headset:", 24, 70, 592, 20)];
@@ -194,11 +203,11 @@ static BOOL ask(NSString* s, NSString* ok) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow*)w {
-  return !_busy;
+  return !(_busy || busy());
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)a {
-  return _busy ? NSTerminateCancel : NSTerminateNow;
+  return _busy || busy() ? NSTerminateCancel : NSTerminateNow;
 }
 
 - (void)theme:(int)i {
@@ -237,12 +246,12 @@ static BOOL ask(NSString* s, NSString* ok) {
 
 - (void)job:(NSButton*)b {
   static const char* kAction[] = {"install", "check", "remove"};
-  if (b.tag == 2 && !ask(@"Remove Framey and Fan Control from the headset, with their saved settings?", @"Remove")) return;
+  if (b.tag != 1 && !ask(b.tag ? @"Remove Framey, Fan Control, all plugins and their saved settings from the headset, and this app's key and data from this computer?" : @"Install or update Framey on the headset? If SteamVR is running it will be restarted, which ends the current VR session.", b.tag ? @"Remove" : @"Install")) return;
   [self go:kAction[b.tag] source:@""];
 }
 
 - (void)addPlugin:(id)s {
-  if (ask(@"A plugin runs code on your headset, inside Steam's interface. Only install plugins you trust. Continue?", @"Continue"))
+  if (ask(@"A plugin runs code on your headset, inside Steam's interface. Only install plugins you trust. If SteamVR is running it will be restarted, which ends the current VR session. Continue?", @"Continue"))
     [self go:"plugin" source:_src.stringValue];
 }
 

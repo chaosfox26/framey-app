@@ -7,7 +7,7 @@ on:
         required: false
         default: ""
 permissions:
-  contents: write
+  contents: read
 jobs:
   pin:
     runs-on: ubuntu-latest
@@ -17,8 +17,11 @@ jobs:
     steps:
       - id: sha
         run: |
-          echo "framey=$(git ls-remote https://github.com/chaosfox26/framey refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "fan=$(git ls-remote https://github.com/chaosfox26/frame-fan refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+          f=$(git ls-remote https://github.com/chaosfox26/framey refs/heads/main | cut -f1)
+          a=$(git ls-remote https://github.com/chaosfox26/frame-fan refs/heads/main | cut -f1)
+          for s in "$f" "$a"; do echo "$s" | grep -Eqx '[0-9a-f]{40}' || { echo "not a commit id: '$s'"; exit 1; }; done
+          echo "framey=$f" >> "$GITHUB_OUTPUT"
+          echo "fan=$a" >> "$GITHUB_OUTPUT"
   build:
     needs: pin
     strategy:
@@ -35,6 +38,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Fetch the pinned repos that get bundled
         shell: bash
         run: |
@@ -62,6 +67,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           cmake --build build
           lipo -info build/FrameyApp
+          lipo -verify_arch build/FrameyApp arm64 x86_64
       - name: Package
         shell: bash
         run: |
@@ -77,13 +83,17 @@ jobs:
     if: ${{ inputs.tag != '' }}
     needs: [pin, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
     steps:
       - name: Check the release tag points at this commit
         run: |
-          tagsha=$(gh api "repos/${{ github.repository }}/commits/${{ inputs.tag }}" --jq .sha)
-          [ "$tagsha" = "${{ github.sha }}" ] || { echo "Tag ${{ inputs.tag }} is $tagsha, not ${{ github.sha }}"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9.]+$ ]] || { echo "Tag must look like v1.0.0"; exit 1; }
+          tagsha=$(gh api "repos/${{ github.repository }}/commits/$TAG" --jq .sha)
+          [ "$tagsha" = "${{ github.sha }}" ] || { echo "Tag $TAG is $tagsha, not ${{ github.sha }}"; exit 1; }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: out
@@ -97,4 +107,4 @@ jobs:
       - name: Attach everything to the release
         run: |
           curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/LICENSE" -o out/LICENSE.txt
-          gh release upload "${{ inputs.tag }}" out/* --repo "${{ github.repository }}"
+          gh release upload "$TAG" out/* --repo "${{ github.repository }}"

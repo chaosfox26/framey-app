@@ -59,7 +59,7 @@ HWND w;
 HFONT f, big;
 HBRUSH bgb, fdb, acb;
 int cur, th, dpi;
-bool busy, fan;
+bool locked, fan;
 size_t since;
 std::wstring last;
 
@@ -217,10 +217,10 @@ void poll() {
     last = st;
     SetWindowTextW(c(STATUS), st.c_str());
   }
-  if (s.busy != busy) {
-    busy = s.busy;
-    for (int id : {INSTALL, CHECK, REMOVE, PICK, ADD}) EnableWindow(c(id), !busy);
-    if (!busy) SetWindowTextW(c(PW), L"");
+  if (s.busy != locked) {
+    locked = s.busy;
+    for (int id : {INSTALL, CHECK, REMOVE, PICK, ADD}) EnableWindow(c(id), !locked);
+    if (!locked) SetWindowTextW(c(PW), L"");
   }
 }
 
@@ -326,7 +326,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
       return TRUE;
     case WM_COMMAND: {
       int id = LOWORD(wp);
-      if (HIWORD(wp) != BN_CLICKED) break;
+      if (HIWORD(wp) != BN_CLICKED && HIWORD(wp) != BN_DOUBLECLICKED) break;
       if (id >= SW && id < SW + 4) {
         cur = id - SW;
         save_theme(kThemes[cur]);
@@ -335,20 +335,20 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         fan = !fan;
         InvalidateRect(c(FAN), nullptr, FALSE);
       } else if (id == INSTALL) {
-        run("install");
+        if (ask(L"Install or update Framey on the headset? If SteamVR is running it will be restarted, which ends the current VR session.")) run("install");
       } else if (id == CHECK) {
         run("check");
       } else if (id == REMOVE) {
-        if (ask(L"Remove Framey and Fan Control from the headset, with their saved settings?")) run("remove");
+        if (ask(L"Remove Framey, Fan Control, all plugins and their saved settings from the headset, and this app's key and data from this computer?")) run("remove");
       } else if (id == ADD) {
-        if (ask(L"A plugin runs code on your headset, inside Steam's interface. Only install plugins you trust. Continue?")) run("plugin");
+        if (ask(L"A plugin runs code on your headset, inside Steam's interface. Only install plugins you trust. If SteamVR is running it will be restarted, which ends the current VR session. Continue?")) run("plugin");
       } else if (id == PICK) {
         browse();
       }
       return 0;
     }
     case WM_CLOSE:
-      if (busy) return 0;
+      if (locked || busy()) return 0;
       break;
     case WM_DESTROY:
       PostQuitMessage(0);

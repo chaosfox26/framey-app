@@ -2,3 +2,5 @@ build/
 dist/
 generated/
 payload/
+FrameyApp-data/
+key-*

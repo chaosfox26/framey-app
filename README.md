@@ -39,27 +39,27 @@ The Linux and macOS archives contain `FrameyApp` and `LICENSE`. The release also
 2. Developer (left menu) > scroll to the bottom > Set User Password.
 3. Keep the headset awake and on the same network as your computer.
 4. Run the app (on Linux and macOS unpack the archive first). Enter the headset address (default `frame`, or its IP address) and the password from step 2.
-5. Click **Install / Update**. Tick **Also install Fan Control** first if you want it. SteamVR restarts at the end, which ends any running VR session.
+5. Click **Install / Update**. Tick **Also install Fan Control** first if you want it. The app asks first, because if SteamVR is running it is restarted at the end, which ends the running VR session.
 6. Put the headset on and tap the Framey icon in the bottom bar.
 
 ## What it does
 
 It is one C++26 program with a native window on each system: Win32 on Windows, Cocoa on macOS and GTK 3 on Linux. There is no browser, no local web server and no open port. It has four retro themes (Magenta, Blue, Black in green phosphor, and a light White one) and uses your system's own `ssh`, `scp`, `ssh-keygen`, `curl` and `tar`, which must be on the `PATH`; opening a `.zip` plugin also needs `bsdtar`, `unzip` or a `tar` that is bsdtar. It connects to the headset as the user `steamos`.
 
-- **Install / Update:** installs Framey and, if you tick **Also install Fan Control**, Fan Control. For each it looks up the latest `main` commit on GitHub and downloads that exact commit over https. If GitHub is unreachable it uses the copy bundled in the app, which is the commit listed in `PROVENANCE.txt`. The new version is uploaded next to the old one and swapped in, and the previous version is restored if the setup fails. Installed plugins are kept. Fan Control is only updated when the box is ticked, and its system step needs the headset password every time. Plugins you added from a link are refreshed too. SteamVR is then restarted.
-- **Check for updates:** compares the version on the headset with the latest commit on GitHub for Framey and Fan Control. It changes nothing.
-- **Add plugin:** installs a Framey plugin from a `.zip` (or `.tar.gz`) file you browse to, or from a GitHub link or an https link to such a file. It then restarts Framey and SteamVR, so any running VR session ends. Framey must already be installed. Plugins added from a link are updated again each time you click **Install / Update**.
-- **Remove:** removes Framey, its plugins, Fan Control (which restores stock fan control), their saved settings, and this app's own SSH key and data.
+- **Install / Update:** installs Framey and, if you tick **Also install Fan Control**, Fan Control. For each it looks up the latest `main` commit on GitHub and downloads that exact commit over https. If GitHub is unreachable it uses the copy bundled in the app (the commit listed in `PROVENANCE.txt`), but only when nothing of that kind is installed yet or the installed commit is the same; otherwise it stops without changing anything, because the bundled copy could be older. When Fan Control is ticked, the app first checks that the headset accepts the password, before anything is changed. The new version is uploaded next to the old one and swapped in, Framey must be running again two seconds later, and the previous version is restored if that fails. The old copies (`framey.bak`, `frame-fan.bak`) are deleted only after Fan Control's system step and the final checks have passed. If Fan Control's system step fails, Fan Control is put back as it was and Framey stays updated. Installed plugins are kept. Fan Control is only updated when the box is ticked, and its system step needs the headset password every time. Plugins you added from a link are refreshed too. SteamVR is then restarted if it is running.
+- **Check for updates:** compares the version on the headset with the latest commit on GitHub for Framey and Fan Control. It changes nothing on the headset, apart from the one-time key authorization on first use: if the app has no working key for that headset yet and you entered the password, it creates its SSH key on this computer and adds it to `~/.ssh/authorized_keys` on the headset (see Connection setup).
+- **Add plugin:** installs a Framey plugin from a `.zip` (or `.tar.gz`) file you browse to, or from a GitHub link or an https link to such a file. It then restarts Framey, and SteamVR if it is running, so a running VR session ends. Framey must already be installed. Plugins added from a link are updated again each time you click **Install / Update**.
+- **Remove:** removes Framey, its plugins, Fan Control (which restores stock fan control), their saved settings, and this app's own SSH key and data. If something on this computer cannot be deleted, it says so, lists it and reports "Removed, with leftovers" instead of claiming everything is clean.
 
-SteamVR is restarted (`systemctl --user restart steamvr.service`) after every Install / Update and after every Add plugin. There is no setting to turn that off.
+SteamVR is restarted with `systemctl --user try-restart steamvr.service` after a successful Install / Update and after a successful Add plugin, and only if it is running. The log says whether it was restarted or was not running (an idle SteamVR is not started). Install / Update and Add plugin ask for confirmation first and mention this. If the install stops early (for example a wrong password or a failed Fan Control step), SteamVR is not restarted. There is no setting to turn the restart off.
 
-The window cannot be closed while a job is running. The license notice (GPL-2.0 only, with the source link) is shown in the app's log when it starts.
+The window cannot be closed, and on macOS the app cannot be quit, while a job is running. Every step has a time limit so that a dropped Wi-Fi link cannot hang it forever: `ssh` and `scp` send keepalives every 10 seconds and give up after three missed ones, each headset step is stopped after 120 seconds (uploads after 600, downloads after 150), and the log says which step timed out. The license notice (GPL-2.0 only, with the source link) is shown in the app's log when it starts.
 
 ## Connection setup and permission prompts
 
-- The first time on a headset you enter the password you set in Developer settings. The app uses it once to add its own SSH key to the headset, so later jobs need no password. The password is also used for the Fan Control root step through `sudo`. It is only sent to your headset and is never saved; the field is cleared when a job ends.
-- The key is an ed25519 key created by the app, with a separate key for each headset address (`key-<address>` in the data folder). Adding it puts one line, with a comment like `framey-app-` plus 12 random characters that is unique to that key, into `~/.ssh/authorized_keys` on the headset. The headset's host key is trusted the first time it is seen.
-- The app asks you to confirm before a plugin is installed ("only install plugins you trust") and before **Remove**.
+- The first time on a headset you enter the password you set in Developer settings. The app uses it once to add its own SSH key to the headset, so later jobs need no password. If the headset cannot be reached, or its saved host key changed (for example after reinstalling SteamOS), the log says that instead of asking for the password; to trust the new host key, delete the `known_hosts` file in `FrameyApp-data`. The password is also used for the Fan Control root step through `sudo`. It is only sent to your headset and is never saved; the field is cleared when a job ends.
+- The key is an ed25519 key created by the app, with a separate key for each headset address (`key-<address>` in the data folder). Adding it puts one line, with a comment like `framey-app-` plus 12 random characters that is unique to that key, into `~/.ssh/authorized_keys` on the headset, on its own line even if the file did not end with a newline. If the `.pub` file next to the key is missing or unreadable, the app derives the public key from the private key. The headset's host key is trusted the first time it is seen.
+- The app asks you to confirm before Install / Update, before a plugin is installed ("only install plugins you trust") and before **Remove**. The Install / Update and Add plugin prompts mention the SteamVR restart.
 - Your system may warn about an unsigned download. See [Download](#download).
 
 ## Portable data
@@ -68,8 +68,8 @@ Nothing is installed, and the app writes nothing to the registry or your home fo
 
 ## Updating and removal
 
-- Update with **Install / Update**. Framey is restarted so its panel picks up changes, then SteamVR is restarted.
-- **Remove** works in a fixed order. It first checks whether Fan Control's system files are on the headset. If they are, it needs the headset password and removes them first. If that fails, or stock fan control is not running again afterwards, nothing else is deleted and Remove reports a failure so you can try again. Then it removes Framey, its plugins and settings from the headset, then removes only the exact key this app created for that headset from `authorized_keys`, not any other key, and deletes that key on your computer. The data folder is deleted last, and only if no key for another headset remains in it. Remove does not restart SteamVR.
+- Update with **Install / Update**. Framey is restarted so its panel picks up changes, then SteamVR is restarted if it is running.
+- **Remove** works in a fixed order. It first checks whether Fan Control's system files are on the headset. If they are, it needs the headset password and removes them first. If that fails, or stock fan control is not running again afterwards, nothing else is deleted and Remove reports a failure so you can try again. Then it removes Framey, its plugins and settings from the headset, then removes only the exact key this app created for that headset from `authorized_keys`, not any other key, and deletes that key on your computer. The key is read (or derived from the private key) before anything is deleted, and Remove stops early if that is impossible. If a local file cannot be deleted, the result says "Removed, with leftovers" and lists it. The data folder is deleted last, and only if no key for another headset remains in it. Remove does not restart SteamVR.
 
 ## Platforms and verification
 
@@ -84,7 +84,7 @@ Nothing is installed, and the app writes nothing to the registry or your home fo
 - The Linux and macOS windows and runtime.
 - First-time password authorization in the current app. It worked in an earlier Windows-only version.
 - The Fan Control root-install step through the current app. It worked in that earlier version.
-- The new remove sequence, the staged update and swap of Framey, Fan Control and plugins, and the archive checks, none of which have been run against a headset yet.
+- The new remove sequence, the staged update and swap of Framey, Fan Control and plugins (including the health check, the Fan Control undo and the kept `.bak` folders), the time limits and keepalives, and the archive checks, none of which have been run against a headset yet.
 
 AI authorship and a successful build are not evidence that something works.
 
@@ -92,8 +92,9 @@ AI authorship and a successful build are not evidence that something works.
 
 - The app has no network listener: it is a native window and opens no local port.
 - Framey and Fan Control are downloaded over https from the `chaosfox26` repositories, pinned to the one commit that was looked up. The app then runs Fan Control's install script as root on the headset, so use it only with repositories you trust. Plugins run code on your headset, and plugins added from a link are not pinned to a commit.
-- Plugin and suite packages are listed and checked before anything is extracted. Absolute paths, `..`, links, special files, duplicate names and oversized or over-deep packages are rejected (limits: 500 entries, 8 levels, 20 MB), extraction has a 60 second limit, and the extracted tree is checked again afterwards.
+- Plugin and suite packages are listed and checked before anything is extracted. Absolute paths, `..`, links, special files, duplicate names and oversized or over-deep packages are rejected (limits: 500 entries, 8 levels, 20 MB). The sizes are read from the listing by matching each entry's name, not by column position. Because a `.zip` can understate its sizes, extraction is also watched: if the files on disk pass 20 MB, the extractor is stopped and the package is refused. Extraction has a 60 second limit, and the extracted tree is checked again afterwards. A plugin's `plugin.json` must be strictly valid JSON: an object with a valid `id`, and `name`, `version` and `short` (if present) must be strings, as Framey itself requires.
 - Plugin installs and updates are staged next to the live copy and swapped in with a rollback, so a failed update keeps the working copy.
+- Fan Control's install and uninstall scripts are run as root from `/home/steamos/frame-fan/` on the headset, a folder owned by the `steamos` user, not from a root-owned location. Any program running as `steamos` on the headset, such as a plugin, could change those scripts before the app runs them with your password. Install Fan Control only on a headset where you trust every plugin. The app does not yet copy the scripts into a root-owned folder first.
 
 ## Roadmap (not implemented)
 

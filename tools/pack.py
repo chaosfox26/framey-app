@@ -1,4 +1,4 @@
-import io, pathlib, subprocess, tarfile
+import gzip, io, pathlib, subprocess, sys, tarfile
 
 root = pathlib.Path(__file__).resolve().parent.parent
 repos = {"framey": root.parent / "Framey", "frame-fan": root.parent / "frame-fan"}
@@ -11,13 +11,19 @@ def inc(name, data):
 
 
 buf = io.BytesIO()
-with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=9) as dst:
+with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as dst:
     for name, path in repos.items():
         sha = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
         tree = subprocess.run(["git", "-C", str(path), "archive", "--format=tar", "--prefix=" + name + "/", "HEAD"], capture_output=True, check=True).stdout
         with tarfile.open(fileobj=io.BytesIO(tree)) as src:
             for member in src:
-                dst.addfile(member, src.extractfile(member) if member.isfile() else None)
+                data = src.extractfile(member).read() if member.isfile() else None
+                if data is not None and b"\0" not in data:
+                    data = data.replace(b"\r\n", b"\n")
+                    member.size = len(data)
+                if data is not None and member.name.endswith(".sh") and b"\r" in data:
+                    sys.exit("bundled shell script contains CR: " + member.name)
+                dst.addfile(member, io.BytesIO(data) if data is not None else None)
         info = tarfile.TarInfo(name + "/.version")
         info.size = len(sha)
         info.mode = 0o644
