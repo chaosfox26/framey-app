@@ -521,6 +521,12 @@ bool safe_url(const std::string& u) {
   return true;
 }
 
+void restart_vr() {
+  log("Restarting SteamVR so Framey loads cleanly. A running VR session will end.");
+  auto r = ssh("systemctl --user restart steamvr.service && sleep 3 && systemctl --user is-active --quiet steamvr.service && echo vr-restarted");
+  if (r.out.find("vr-restarted") == std::string::npos) log("SteamVR did not restart. Restart it from the headset, then check Framey.\n" + tail(r.out));
+}
+
 bool install_plugin(std::string src, bool restart) {
   src = unquote(src);
   fs::path work = g_work / ("plugin-" + std::to_string(std::hash<std::string>{}(src) % 100000));
@@ -588,6 +594,7 @@ bool install_plugin(std::string src, bool restart) {
   if (restart) {
     r = ssh(std::format("systemctl --user restart framey.service && sleep 2 && systemctl --user is-active framey.service && test -f {}/framey/plugins/{}/plugin.json && echo plugin-in-place", kHome, id));
     if (r.out.find("plugin-in-place") == std::string::npos) return log("The plugin was copied but Framey did not restart cleanly.\n" + tail(r.out)), false;
+    restart_vr();
   }
   log(std::format("Plugin {} is installed.", id));
   return true;
@@ -640,6 +647,7 @@ void do_install() {
   for (std::string u; std::getline(list, u);)
     if (!trim(u).empty() && install_plugin(trim(u), false)) updated++;
   if (updated) ssh("systemctl --user restart framey.service");
+  restart_vr();
   r = ssh("systemctl --user is-active framey.service; ss -ltn 2>/dev/null | grep -q ':8080 ' && echo debug-port-open || echo debug-port-closed");
   if (r.out.find("debug-port-closed") != std::string::npos) log("Warning: Steam's debug port is not open. Make sure Steam is running on the headset.");
   if (r.out.find("active") != 0 && r.out.find("\nactive") == std::string::npos) return log("Framey is not running.\n" + tail(r.out));
