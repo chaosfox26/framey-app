@@ -24,5 +24,4 @@ with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=9) as dst:
         dst.addfile(info, io.BytesIO(sha.encode()))
         print(name, sha)
 inc("payload.inc", buf.getvalue())
-inc("ui.inc", (root / "src" / "ui.html").read_bytes())
 print("payload", len(buf.getvalue()), "bytes")

@@ -3,12 +3,24 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to attach the builds to
-        required: true
+        description: Existing release tag to attach the builds to (leave empty to only build)
+        required: false
+        default: ""
 permissions:
   contents: write
 jobs:
+  pin:
+    runs-on: ubuntu-latest
+    outputs:
+      framey: ${{ steps.sha.outputs.framey }}
+      fan: ${{ steps.sha.outputs.fan }}
+    steps:
+      - id: sha
+        run: |
+          echo "framey=$(git ls-remote https://github.com/chaosfox26/framey refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "fan=$(git ls-remote https://github.com/chaosfox26/frame-fan refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
   build:
+    needs: pin
     strategy:
       matrix:
         include:
@@ -23,11 +35,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch the repos that get bundled
+      - name: Fetch the pinned repos that get bundled
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/chaosfox26/framey ../Framey
-          git clone --depth 1 https://github.com/chaosfox26/frame-fan ../frame-fan
+          fetch() { git init -q "$1" && git -C "$1" fetch -q --depth 1 "https://github.com/chaosfox26/$2" "$3" && git -C "$1" checkout -q FETCH_HEAD; }
+          fetch ../Framey framey "${{ needs.pin.outputs.framey }}"
+          fetch ../frame-fan frame-fan "${{ needs.pin.outputs.fan }}"
           python3 tools/pack.py || python tools/pack.py
       - name: Build (Windows)
         if: runner.os == 'Windows'
@@ -40,34 +53,48 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-14
+          sudo apt-get install -y g++-14 libgtk-3-dev pkg-config
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14
           cmake --build build
-      - name: Build (macOS)
+      - name: Build (macOS, universal)
         if: runner.os == 'macOS'
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           cmake --build build
+          lipo -info build/FrameyApp
       - name: Package
         shell: bash
         run: |
           mkdir out
-          if [ "$RUNNER_OS" = "Windows" ]; then cp build/FrameyApp.exe out/${{ matrix.asset }}; else tar -czf out/${{ matrix.asset }} -C build FrameyApp; fi
+          if [ "$RUNNER_OS" = "Windows" ]; then cp build/FrameyApp.exe out/${{ matrix.asset }}; else cp build/FrameyApp LICENSE out/ && tar -czf ${{ matrix.asset }} -C out FrameyApp LICENSE && rm out/FrameyApp out/LICENSE && mv ${{ matrix.asset }} out/; fi
           ls -l out
-      - name: Attach to the release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.tag }}" out/${{ matrix.asset }} --clobber --repo "${{ github.repository }}"
-  sums:
-    needs: build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/${{ matrix.asset }}
+          if-no-files-found: error
+  publish:
+    if: ${{ inputs.tag != '' }}
+    needs: [pin, build]
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Publish checksums
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Check the release tag points at this commit
         run: |
-          gh release download "${{ inputs.tag }}" --repo "${{ github.repository }}" --pattern "FrameyApp-*"
+          tagsha=$(gh api "repos/${{ github.repository }}/commits/${{ inputs.tag }}" --jq .sha)
+          [ "$tagsha" = "${{ github.sha }}" ] || { echo "Tag ${{ inputs.tag }} is $tagsha, not ${{ github.sha }}"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums and provenance
+        run: |
+          cd out
           sha256sum FrameyApp-* > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-          gh release upload "${{ inputs.tag }}" SHA256SUMS.txt --clobber --repo "${{ github.repository }}"
+          printf 'framey-app %s\nframey %s\nframe-fan %s\n' "${{ github.sha }}" "${{ needs.pin.outputs.framey }}" "${{ needs.pin.outputs.fan }}" > PROVENANCE.txt
+          cat SHA256SUMS.txt PROVENANCE.txt
+      - name: Attach everything to the release
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/LICENSE" -o out/LICENSE.txt
+          gh release upload "${{ inputs.tag }}" out/* --repo "${{ github.repository }}"

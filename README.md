@@ -22,11 +22,11 @@ Framey grew from a wish to make the Steam Frame easier to customize through a li
 
 ## What it does
 
-It is one C++26 program with no libraries to install. It opens a local page in your browser, with four dark retro themes (Magenta, Blue, Black and a light White one), and uses your system's own `ssh`, `scp`, `ssh-keygen`, `curl` and `tar`.
+It is one C++26 program with a native window on each system (Win32 on Windows, Cocoa on macOS, GTK 3 on Linux) and no browser or web server. It has four retro themes (Magenta, Blue, Black and a light White one), and uses your system's own `ssh`, `scp`, `ssh-keygen`, `curl` and `tar`.
 
 - **Install / Update:** installs Framey and, if you tick **Also install Fan Control**, Fan Control. It takes the latest `main` of both repositories from GitHub and falls back to a copy bundled inside the app if GitHub is unreachable.
 - **Check for updates:** compares what is on the headset with the latest commit on GitHub.
-- **Add plugin:** installs a Framey plugin from an uploaded `.zip` or a GitHub link. It then restarts Framey so the plugin appears in the headset's panel on its own. Plugins added from a link are updated again each time you click **Install / Update**.
+- **Add plugin:** installs a Framey plugin from a `.zip` file you browse to or a GitHub link. It then restarts Framey so the plugin appears in the headset's panel on its own. Plugins added from a link are updated again each time you click **Install / Update**.
 - **Remove:** removes Framey, its plugins and Fan Control (which restores stock fan control), and the app's own SSH key and data.
 
 ## Use
@@ -37,13 +37,13 @@ On the headset:
 2. Developer (left menu) > scroll to the bottom > Set User Password.
 3. Keep the headset awake and on the same network as your computer.
 
-Then download the build for your system from [Releases](https://github.com/chaosfox26/framey-app/releases). On Linux and macOS unpack it and run `./FrameyApp` in a terminal. On Windows run `FrameyApp-windows.exe`. Enter the headset address (usually `frame`) and click **Install / Update**. Close the app's window or terminal to quit.
+Then download the build for your system from [Releases](https://github.com/chaosfox26/framey-app/releases). On Linux and macOS unpack it and run `FrameyApp`. On Windows run `FrameyApp-windows.exe`. Enter the headset address (usually `frame`) and click **Install / Update**. Close the window to quit; it will not close while a job is running. On Linux the GTK 3 runtime library (`libgtk-3`) must be installed.
 
 ## Connection setup and permission prompts
 
 - The first time, you enter the headset password you set in Developer settings. The app uses it once to add its own SSH key to the headset, so later updates need no password. The password is also used for the Fan Control root step through `sudo`. It is only sent to your headset and is never saved.
-- The key is an ed25519 key created by the app. Adding it puts one line, ending in `framey-app`, into `~/.ssh/authorized_keys` on the headset. The headset's host key is trusted the first time it is seen.
-- The browser asks you to confirm before a plugin is installed ("only install plugins you trust") and before **Remove**.
+- The key is an ed25519 key created by the app. Adding it puts one line, with a comment like `framey-app-` plus 12 random characters that is unique to this copy of the app, into `~/.ssh/authorized_keys` on the headset. The headset's host key is trusted the first time it is seen.
+- The app asks you to confirm before a plugin is installed ("only install plugins you trust") and before **Remove**.
 - Your system may warn about an unsigned download. On macOS right-click the app and choose Open the first time.
 
 ## Portable data
@@ -53,30 +53,30 @@ Nothing is installed, and nothing is written to the registry or your home folder
 ## Updating and removal
 
 - Update with **Install / Update**. Framey is restarted so its panel picks up changes.
-- **Remove** takes Framey, its plugins and Fan Control off the headset. It removes only the lines in `authorized_keys` that end with the app's own `framey-app` comment, not any other key, then deletes the app's data folder. Fan Control removal asks for the headset password.
+- **Remove** takes Framey, its plugins and Fan Control off the headset. Fan Control goes first and needs the headset password: if its system files cannot be removed, nothing else is deleted and Remove reports a failure so you can try again. Then it removes only the exact key this app created from `authorized_keys`, not any other key, and last deletes the app's data folder.
 
 ## Platforms and verification
 
 | Platform | Build | Runtime evidence |
 |---|---|---|
-| Windows (x64) | Built locally and by the release workflow. | Run by the author against a Steam Frame: check, install, offline install, plugin from a GitHub link and from a zip, automatic plugin update, remove. |
-| Linux arm64 | Built by the release workflow and compiled locally. | Started and exercised on the Steam Frame itself: the web page, token and host checks, starting jobs and cleanup. It was not used to install onto a headset. |
-| Linux x86_64 | Built by the release workflow. | Not run by the author. |
-| macOS | Built by the release workflow. | Not run by the author. |
+| Windows (x64) | Built locally and by the release workflow. | The native window was launched and inspected on Windows. The install, update, plugin and remove logic is unchanged from earlier builds that ran against a Steam Frame, apart from the fixes listed below, which have not yet been run against a headset. |
+| Linux x86_64, Linux arm64 | Built by the release workflow. | Not run by the author. The native window has not been run on Linux. |
+| macOS (arm64 and Intel) | Built by the release workflow. | Not run by the author. |
 
 **Currently unverified:**
 
-- macOS runtime.
+- The Linux and macOS windows and runtime.
 - First-time password authorization in the current app. It worked in an earlier Windows-only version.
 - The Fan Control root-install step in the current app. It worked in that earlier version.
+- The safer remove sequence, the staged update and swap of Framey, Fan Control and plugins, and the archive checks, none of which have been run against a headset yet.
 
 AI authorship and a successful build are not evidence that something works.
 
 ## Security notes
 
-- The local page listens only on `127.0.0.1`, needs a random token that is part of the link the app opens, and rejects requests with a different `Host` header.
+- The app has no network listener: it is a native window and opens no local port.
 - The app downloads the latest `main` of the repositories above and runs Fan Control's install script as root on the headset, so use it only with repositories you trust. Plugins run code on your headset.
-- Rejecting plugin packages that contain symlinks or other special files, and skipping symlinks when staging, is included from release 1.0.2. The 1.0.1 builds do not have it.
+- Plugin packages are listed and checked before anything is extracted. Absolute paths, `..`, links, special files, duplicates and oversized or over-deep packages are rejected, extraction has a time limit, and the extracted tree is checked again afterwards.
 
 ## Roadmap (not implemented)
 
