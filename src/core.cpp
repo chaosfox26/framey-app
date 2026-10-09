@@ -258,8 +258,15 @@ std::string path_opt(const char* name, const fs::path& p) {
   return std::string(name) + "=" + (s.find(' ') == std::string::npos ? s : "\"" + s + "\"");
 }
 
+fs::path key_file() {
+  std::string h = g_target;
+  std::replace(h.begin(), h.end(), '.', '_');
+  std::replace(h.begin(), h.end(), ':', '~');
+  return g_dir / ("key-" + h);
+}
+
 Args ssh_base() {
-  return {"-i", (g_dir / "id_ed25519").string(), "-o", "IdentitiesOnly=yes", "-o", path_opt("UserKnownHostsFile", g_dir / "known_hosts"), "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=12"};
+  return {"-i", key_file().string(), "-o", "IdentitiesOnly=yes", "-o", path_opt("UserKnownHostsFile", g_dir / "known_hosts"), "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=12"};
 }
 
 Run ssh(const std::string& remote, const std::string& in = {}) {
@@ -298,14 +305,20 @@ std::string rand_hex(size_t n) {
 }
 
 bool authorize() {
-  if (!fs::exists(g_dir / "id_ed25519")) {
-    run({"ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "framey-app-" + rand_hex(12), "-f", (g_dir / "id_ed25519").string()});
-    if (!fs::exists(g_dir / "id_ed25519")) return log("Could not create an SSH key."), false;
+  fs::path key = key_file(), old = g_dir / "id_ed25519";
+  std::error_code ec;
+  if (!fs::exists(key) && fs::exists(old)) {
+    fs::rename(old, key, ec);
+    fs::rename(old.string() + ".pub", key.string() + ".pub", ec);
+  }
+  if (!fs::exists(key)) {
+    run({"ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "framey-app-" + rand_hex(12), "-f", key.string()});
+    if (!fs::exists(key)) return log("Could not create an SSH key."), false;
   }
   if (!ssh("true").code) return true;
   if (g_pw.empty()) return log("First time on this headset: enter the password you set in its Developer settings."), false;
   log("Adding this app's key to the headset so it can reconnect without the password...");
-  std::ifstream f(g_dir / "id_ed25519.pub");
+  std::ifstream f(key.string() + ".pub");
   std::string pub;
   std::getline(f, pub);
   pub = trim(pub);
@@ -708,15 +721,24 @@ void do_remove() {
                         "rm -rf ~/framey ~/framey.new ~/framey.bak ~/frame-fan ~/frame-fan.new ~/frame-fan.bak ~/.config/framey ~/.config/frame-fan || exit 1\n");
   if (r.code) return fail("Removal had errors.\n" + tail(r.out));
   log("Removing this app's key from the headset...");
-  std::ifstream f(g_dir / "id_ed25519.pub");
+  fs::path key = key_file();
+  std::ifstream f(key.string() + ".pub");
   std::string type, blob;
   f >> type >> blob;
   if (type != "ssh-ed25519" || blob.empty() || !std::all_of(blob.begin(), blob.end(), [](unsigned char c) { return isalnum(c) || c == '+' || c == '/' || c == '='; })) return fail("Could not read the app's key file.");
   r = ssh("sh -s", drop_key(blob));
   if (r.code) return fail("Could not remove the app's key.\n" + tail(r.out));
+  f.close();
   std::error_code ec;
-  fs::remove_all(g_dir, ec);
-  log("Done. The headset and this computer are clean: the app's key, settings and temporary files are gone too.");
+  fs::remove(key, ec);
+  fs::remove(key.string() + ".pub", ec);
+  run({"ssh-keygen", "-q", "-R", g_target, "-f", (g_dir / "known_hosts").string()});
+  fs::remove(g_dir / "known_hosts.old", ec);
+  bool others = false;
+  for (auto& e : fs::directory_iterator(g_dir, ec))
+    if (e.path().filename().string().starts_with("key-")) others = true;
+  if (!others) fs::remove_all(g_dir, ec);
+  log(others ? "Done. This headset is clean and its key is gone; keys for other headsets were kept." : "Done. The headset and this computer are clean: the app's key, settings and temporary files are gone too.");
   status("Removed.");
 }
 
