@@ -1,20 +1,18 @@
-<p align="center"><img src="assets/icon.svg" width="128" height="128" alt="Framy icon"></p>
+<p align="center"><img src="assets/icon.svg" width="128" height="128" alt="Framey icon"></p>
 
-# Framy App
+# Framey App
 
-> **Framy is an AI-made project, developed by ChaosFox using AI coding tools.**
+> **Framey is an AI-made project, developed by ChaosFox using AI coding tools.**
 >
-> **Framy was inspired by [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) and its contributors’ work making Steam Deck customization accessible through plugins. We gratefully acknowledge that inspiration. Framy is an independent project for Steam Frame, with no claimed affiliation or endorsement.**
+> **Framey was inspired by [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) and its contributors’ work making Steam Deck customization accessible through plugins. We gratefully acknowledge that inspiration. Framey is an independent project for Steam Frame, with no claimed affiliation or endorsement.**
 
-The Framy App is a small, portable desktop app that installs, updates and removes [Framy](https://github.com/chaosfox26/framey) and, optionally, [Fan Control](https://github.com/chaosfox26/frame-fan) on a Steam Frame. It connects to the headset over SSH so everything is ready before you put the headset back on. Unofficial and independent of Valve.
-
-Naming: the public name is Framy. This repository keeps the spelling `framey-app` in its name, files and release assets (`FrameyApp`). Those identifiers are unchanged.
+The Framey App is a small, portable desktop app that installs, updates and removes [Framey](https://github.com/chaosfox26/framey) and, optionally, [Fan Control](https://github.com/chaosfox26/frame-fan) on a Steam Frame. It connects to the headset over SSH so everything is ready before you put the headset back on. Unofficial and independent of Valve.
 
 ## Origins and purpose
 
-Framy grew from a wish to make the Steam Frame easier to customize through a lightweight, VR-first plugin interface, starting with convenient fan controls. The Framy App exists so that setting it up does not mean typing commands on the headset.
+Framey grew from a wish to make the Steam Frame easier to customize through a lightweight, VR-first plugin interface, starting with convenient fan controls. The Framey App exists so that setting it up does not mean typing commands on the headset.
 
-## The Framy projects
+## The Framey projects
 
 | Project | What it is |
 |---|---|
@@ -26,10 +24,10 @@ Framy grew from a wish to make the Steam Frame easier to customize through a lig
 
 It is one C++26 program with no libraries to install. It opens a local page in your browser, with four dark retro themes (Magenta, Blue, Black and a light White one), and uses your system's own `ssh`, `scp`, `ssh-keygen`, `curl` and `tar`.
 
-- **Install / Update:** installs Framy and, if you tick **Also install Fan Control**, Fan Control. It takes the latest `main` of both repositories from GitHub and falls back to a copy bundled inside the app if GitHub is unreachable.
+- **Install / Update:** installs Framey and, if you tick **Also install Fan Control**, Fan Control. It takes the latest `main` of both repositories from GitHub and falls back to a copy bundled inside the app if GitHub is unreachable.
 - **Check for updates:** compares what is on the headset with the latest commit on GitHub.
-- **Add plugin:** installs a Framy plugin from an uploaded `.zip` or a GitHub link. It then restarts Framy so the plugin appears in the headset's panel on its own. Plugins added from a link are updated again each time you click **Install / Update**.
-- **Remove:** removes Framy, its plugins and Fan Control (which restores stock fan control), and the app's own SSH key and data.
+- **Add plugin:** installs a Framey plugin from an uploaded `.zip` or a GitHub link. It then restarts Framey so the plugin appears in the headset's panel on its own. Plugins added from a link are updated again each time you click **Install / Update**.
+- **Remove:** removes Framey, its plugins and Fan Control (which restores stock fan control), and the app's own SSH key and data.
 
 ## Use
 
@@ -54,8 +52,8 @@ Nothing is installed, and nothing is written to the registry or your home folder
 
 ## Updating and removal
 
-- Update with **Install / Update**. Framy is restarted so its panel picks up changes.
-- **Remove** takes Framy, its plugins and Fan Control off the headset. It removes only the lines in `authorized_keys` that end with the app's own `framey-app` comment, not any other key, then deletes the app's data folder. Fan Control removal asks for the headset password.
+- Update with **Install / Update**. Framey is restarted so its panel picks up changes.
+- **Remove** takes Framey, its plugins and Fan Control off the headset. It removes only the lines in `authorized_keys` that end with the app's own `framey-app` comment, not any other key, then deletes the app's data folder. Fan Control removal asks for the headset password.
 
 ## Platforms and verification
 
@@ -83,7 +81,7 @@ AI authorship and a successful build are not evidence that something works.
 ## Roadmap (not implemented)
 
 - Verify the unverified items above.
-- A temperature and fan readout shown over flat-screen games is a possible future Framy feature. It does not exist yet and is not part of this app.
+- A temperature and fan readout shown over flat-screen games is a possible future Framey feature. It does not exist yet and is not part of this app.
 
 ## Build
 
@@ -91,10 +89,10 @@ See [docs/development.md](docs/development.md).
 
 ## Inspiration and acknowledgments
 
-Framy was inspired by [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) and its contributors’ work making Steam Deck customization accessible through plugins. Thank you to the Decky Loader maintainers and contributors. Framy aims to bring that kind of convenience to the Steam Frame while respecting the work that inspired it.
+Framey was inspired by [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) and its contributors’ work making Steam Deck customization accessible through plugins. Thank you to the Decky Loader maintainers and contributors. Framey aims to bring that kind of convenience to the Steam Frame while respecting the work that inspired it.
 
-The Framy App contains no Decky Loader code, assets or documentation, and has no relationship with the Decky Loader project. The project as a whole is not a clean-room implementation: Decky Loader's public source was read for reference while the loader was designed. A comparison of this repository against Decky Loader's source found no identical code lines. Framy is unofficial and independent of Valve.
+The Framey App contains no Decky Loader code, assets or documentation, and has no relationship with the Decky Loader project. The project as a whole is not a clean-room implementation: Decky Loader's public source was read for reference while the loader was designed. A comparison of this repository against Decky Loader's source found no identical code lines. Framey is unofficial and independent of Valve.
 
 ## License
 
-The Framy App is licensed under the GNU General Public License, version 2. The full text is in [LICENSE](LICENSE), and GitHub identifies it as GPL-2.0. The source files do not carry their own license notices.
+The Framey App is licensed under the GNU General Public License, version 2. The full text is in [LICENSE](LICENSE), and GitHub identifies it as GPL-2.0. The source files do not carry their own license notices.
