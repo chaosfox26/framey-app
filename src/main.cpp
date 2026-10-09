@@ -296,14 +296,32 @@ std::string latest_sha(const std::string& repo) {
   return !r.code && s.size() == 40 ? s : "";
 }
 
-bool extract(const fs::path& archive, const fs::path& to, bool strip = false) {
-  fs::create_directories(to);
+bool plain_tree(const fs::path& p) {
+  std::error_code ec;
+  for (auto it = fs::recursive_directory_iterator(p, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    auto st = it->symlink_status(ec);
+    if (!fs::is_regular_file(st) && !fs::is_directory(st)) return false;
+  }
+  return !ec;
+}
+
+bool unpack(const fs::path& archive, const fs::path& to, bool strip) {
   Args a{"tar", "-xf", archive.string(), "-C", to.string()};
   if (strip) a.insert(a.end(), {"--strip-components", "1"});
   if (!run(a).code) return true;
   if (strip) return false;
   if (have("bsdtar") && !run({"bsdtar", "-xf", archive.string(), "-C", to.string()}).code) return true;
   return have("unzip") && !run({"unzip", "-qo", archive.string(), "-d", to.string()}).code;
+}
+
+bool extract(const fs::path& archive, const fs::path& to, bool strip = false) {
+  fs::create_directories(to);
+  if (!unpack(archive, to, strip)) return false;
+  if (plain_tree(to)) return true;
+  log("That package contains links or special files, which are not allowed.");
+  std::error_code ec;
+  fs::remove_all(to, ec);
+  return false;
 }
 
 bool unpack_bundle(const fs::path& to) {
@@ -328,7 +346,7 @@ std::string stage(const std::string& repo, const fs::path& root) {
   fs::path bundle = g_work / "bundle";
   fs::remove_all(bundle);
   if (!unpack_bundle(bundle) || !fs::exists(bundle / repo)) return log(std::format("{}: GitHub is unreachable and the bundled copy could not be opened.", repo)), "";
-  fs::copy(bundle / repo, dest, fs::copy_options::recursive);
+  fs::copy(bundle / repo, dest, fs::copy_options::recursive | fs::copy_options::skip_symlinks);
   std::ifstream v(dest / ".version");
   std::string s;
   std::getline(v, s);
@@ -430,7 +448,7 @@ bool install_plugin(std::string src, bool restart) {
   if (!valid_id(id)) return log("Could not work out a plugin id. Add an \"id\" to its plugin.json (lowercase letters, digits, - and _)."), false;
   fs::path stage_dir = work / "stage" / id;
   fs::create_directories(stage_dir.parent_path());
-  fs::copy(root, stage_dir, fs::copy_options::recursive);
+  fs::copy(root, stage_dir, fs::copy_options::recursive | fs::copy_options::skip_symlinks);
   fs::remove_all(stage_dir / ".git");
   if (!url.empty()) std::ofstream(stage_dir / ".source") << url;
   log(std::format("Installing plugin {} ({}) on the headset...", name.empty() ? id : name, id));
