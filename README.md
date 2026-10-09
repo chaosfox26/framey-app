@@ -75,16 +75,14 @@ Nothing is installed, and the app writes nothing to the registry or your home fo
 
 | Platform | Build | Runtime evidence |
 |---|---|---|
-| Windows (x64) | Built locally and by the release workflow. | The native window was launched and inspected on Windows. |
+| Windows (x64) | Built locally and by the release workflow. | The native window was launched and inspected on Windows. Version 1.0.1 was run by the author against a Steam Frame (SteamOS 0.4.5): first-time password authorization, Install with Fan Control through the app, and the SteamVR restart worked, and Framey's panel and Fan Control then opened and worked in VR. |
 | Linux x86_64, Linux arm64 | Built by the release workflow; it compiles. | Not run by the author. The native window has not been run on Linux. |
 | macOS (universal: arm64 and Intel) | Built by the release workflow; it compiles. | Not run by the author. |
 
 **Currently unverified:**
 
 - The Linux and macOS windows and runtime.
-- First-time password authorization in the current app. It worked in an earlier Windows-only version.
-- The Fan Control root-install step through the current app. It worked in that earlier version.
-- The new remove sequence, the staged update and swap of Framey, Fan Control and plugins (including the health check, the Fan Control undo and the kept `.bak` folders), the time limits and keepalives, and the archive checks, none of which have been run against a headset yet.
+- The new remove sequence, updating an already installed headset (the staged swap of Framey, Fan Control and plugins (with the health check, the Fan Control undo and the kept `.bak` folders), the time limits and keepalives, and the archive checks, none of which have been run against a headset yet.
 
 AI authorship and a successful build are not evidence that something works.
 
