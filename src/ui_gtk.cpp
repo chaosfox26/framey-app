@@ -18,11 +18,13 @@ constexpr Theme kColors[] = {
     {"#000", "#181818", "#d6ffd6", "#00ff50"},
     {"#eeebde", "#fffffa", "#181818", "#181818"},
 };
+constexpr int kThemeCount = sizeof(kColors) / sizeof(kColors[0]);
+static_assert(kThemeCount == sizeof(kThemes) / sizeof(kThemes[0]));
 
-GtkWidget *win, *host, *pw, *fan, *src, *status_label, *logv, *swatch[4], *lock[5];
+GtkWidget *win, *host, *pw, *fan, *src, *status_label, *logv, *swatch[kThemeCount], *job_controls[5];
 GtkCssProvider* css;
 size_t since = 0;
-bool locked = false;
+bool displayed_busy = false;
 
 using Fn = void (*)(GtkWidget*, gpointer);
 
@@ -45,9 +47,9 @@ textview text{{background-color:{1};color:{2}}}
 check{{background-image:none;background-color:{1};color:{3};border:1px solid {3};border-radius:0;box-shadow:none}}
 )",
                               t.bg, t.fd, t.tx, t.ac);
-  for (int k = 0; k < 4; k++) c += std::format("#sw{}{{background-image:linear-gradient(to right,{} 50%,{} 50%)}}\n", k, kColors[k].bg, kColors[k].ac);
+  for (int k = 0; k < kThemeCount; k++) c += std::format("#sw{}{{background-image:linear-gradient(to right,{} 50%,{} 50%)}}\n", k, kColors[k].bg, kColors[k].ac);
   gtk_css_provider_load_from_data(css, c.c_str(), -1, nullptr);
-  for (int k = 0; k < 4; k++) {
+  for (int k = 0; k < kThemeCount; k++) {
     GtkStyleContext* ctx = gtk_widget_get_style_context(swatch[k]);
     if (k == i) gtk_style_context_add_class(ctx, "on");
     else gtk_style_context_remove_class(ctx, "on");
@@ -122,15 +124,14 @@ gboolean tick(gpointer) {
     gtk_text_buffer_get_end_iter(b, &e);
     gtk_text_buffer_insert(b, &e, v, -1);
     g_free(v);
-    gtk_text_buffer_get_end_iter(b, &e);
     gtk_text_buffer_place_cursor(b, &e);
     gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(logv), gtk_text_buffer_get_insert(b), 0, FALSE, 0, 0);
   }
   gtk_label_set_text(GTK_LABEL(status_label), s.status.c_str());
-  if (s.busy != locked) {
-    locked = s.busy;
-    for (GtkWidget* w : lock) gtk_widget_set_sensitive(w, !locked);
-    if (!locked) gtk_entry_set_text(GTK_ENTRY(pw), "");
+  if (s.busy != displayed_busy) {
+    displayed_busy = s.busy;
+    for (GtkWidget* w : job_controls) gtk_widget_set_sensitive(w, !displayed_busy);
+    if (!displayed_busy) gtk_entry_set_text(GTK_ENTRY(pw), "");
   }
   return G_SOURCE_CONTINUE;
 }
@@ -147,7 +148,7 @@ int ui_run() {
   gtk_window_set_default_size(GTK_WINDOW(win), 640, 720);
   gtk_container_set_border_width(GTK_CONTAINER(win), 24);
   g_signal_connect(win, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
-  g_signal_connect(win, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer) -> gboolean { return locked || busy(); }), nullptr);
+  g_signal_connect(win, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer) -> gboolean { return displayed_busy || busy(); }), nullptr);
 
   GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
   gtk_container_add(GTK_CONTAINER(win), root);
@@ -156,7 +157,7 @@ int ui_run() {
   GtkWidget* title = label("FRAMEY");
   gtk_widget_set_name(title, "title");
   add(head, title, true);
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < kThemeCount; i++) {
     swatch[i] = button("", [](GtkWidget*, gpointer d) {
       int k = GPOINTER_TO_INT(d);
       apply(k);
@@ -187,27 +188,27 @@ int ui_run() {
   add(root, fan);
 
   GtkWidget* bar = hbox(10, true);
-  lock[0] = button("Install / Update", [](GtkWidget*, gpointer) {
+  job_controls[0] = button("Install / Update", [](GtkWidget*, gpointer) {
     if (ask("Install or update Framey on the headset? If SteamVR is running it will be restarted, which ends the current VR session.")) run("install");
   });
-  lock[1] = button("Check for updates", [](GtkWidget*, gpointer) { run("check"); });
-  lock[2] = button("Remove", [](GtkWidget*, gpointer) {
+  job_controls[1] = button("Check for updates", [](GtkWidget*, gpointer) { run("check"); });
+  job_controls[2] = button("Remove", [](GtkWidget*, gpointer) {
     if (ask("Remove Framey, Fan Control, all plugins and their saved settings from the headset, and this app's key and data from this computer?")) run("remove");
   });
-  for (int i = 0; i < 3; i++) add(bar, lock[i], true);
+  for (int i = 0; i < 3; i++) add(bar, job_controls[i], true);
   add(root, bar);
 
   add(root, label("Install a plugin: .zip file or GitHub link"));
   src = gtk_entry_new();
   gtk_entry_set_placeholder_text(GTK_ENTRY(src), "https://github.com/owner/repo");
-  lock[3] = button("Browse...", pick);
-  lock[4] = button("Add plugin", [](GtkWidget*, gpointer) {
+  job_controls[3] = button("Browse...", pick);
+  job_controls[4] = button("Add plugin", [](GtkWidget*, gpointer) {
     if (ask("A plugin runs code on your headset, inside Steam's interface. Only install plugins you trust. If SteamVR is running it will be restarted, which ends the current VR session. Continue?")) run("plugin", text(src));
   });
   GtkWidget* plug = hbox(12);
   add(plug, src, true);
-  add(plug, lock[3]);
-  add(plug, lock[4]);
+  add(plug, job_controls[3]);
+  add(plug, job_controls[4]);
   add(root, plug);
 
   status_label = label("");
@@ -227,7 +228,7 @@ int ui_run() {
 
   std::string t = saved("theme.txt");
   int cur = 0;
-  for (int i = 0; i < 4; i++)
+  for (int i = 0; i < kThemeCount; i++)
     if (t == kThemes[i]) cur = i;
   apply(cur);
 

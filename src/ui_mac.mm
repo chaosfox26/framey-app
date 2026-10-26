@@ -12,6 +12,10 @@ static const Theme kT[] = {
   {0x000000, 0x181818, 0xd6ffd6, 0x00ff50},
   {0xeeebde, 0xfffffa, 0x181818, 0x181818},
 };
+constexpr int kThemeCount = sizeof(kT) / sizeof(kT[0]);
+static_assert(kThemeCount == sizeof(kThemes) / sizeof(kThemes[0]));
+enum ActionTag : NSInteger { kInstallAction = 0, kCheckAction, kRemoveAction };
+
 static NSString* ns(const std::string& s) {
   NSString* r = [[NSString alloc] initWithBytes:s.data() length:s.size() encoding:NSUTF8StringEncoding];
   return r ? r : @"";
@@ -110,7 +114,7 @@ static BOOL ask(NSString* s, NSString* ok) {
   NSColor* _tx;
   NSMutableArray *_labels, *_fields, *_btns, *_sw;
   size_t _since;
-  bool _busy;
+  bool _displayed_busy;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)n {
@@ -144,7 +148,7 @@ static BOOL ask(NSString* s, NSString* ok) {
 
   _title = label(v, @"FRAMEY", 24, 18, 300, 42);
   _title.font = mono(32, NSFontWeightBold);
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < kThemeCount; i++) {
     NSButton* b = button(v, self, @selector(pick:), @"", 472 + i * 38, 24, 30, 30);
     b.tag = i;
     b.toolTip = ns(kThemes[i]);
@@ -165,10 +169,14 @@ static BOOL ask(NSString* s, NSString* ok) {
   _fan = [NSButton checkboxWithTitle:@"Also install Fan Control" target:nil action:nil];
   _fan.frame = NSMakeRect(24, 288, 592, 20);
   [v addSubview:_fan];
-  NSString* names[] = {@"Install / Update", @"Check for updates", @"Remove"};
+  struct { NSInteger tag; NSString* title; } actions[] = {
+    {kInstallAction, @"Install / Update"},
+    {kCheckAction, @"Check for updates"},
+    {kRemoveAction, @"Remove"},
+  };
   for (int i = 0; i < 3; i++) {
-    NSButton* b = button(v, self, @selector(job:), names[i], 24 + i * 201, 320, 190, 36);
-    b.tag = i;
+    NSButton* b = button(v, self, @selector(job:), actions[i].title, 24 + i * 201, 320, 190, 36);
+    b.tag = actions[i].tag;
     [_btns addObject:b];
   }
   [_labels addObject:label(v, @"Install a plugin: .zip file or GitHub link", 24, 370, 592, 18)];
@@ -187,7 +195,7 @@ static BOOL ask(NSString* s, NSString* ok) {
 
   int t = 0;
   std::string name = saved("theme.txt");
-  for (int i = 0; i < 4; i++)
+  for (int i = 0; i < kThemeCount; i++)
     if (name == kThemes[i]) t = i;
   [self theme:t];
   [_win center];
@@ -203,11 +211,11 @@ static BOOL ask(NSString* s, NSString* ok) {
 }
 
 - (BOOL)windowShouldClose:(NSWindow*)w {
-  return !(_busy || busy());
+  return !(_displayed_busy || busy());
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)a {
-  return _busy || busy() ? NSTerminateCancel : NSTerminateNow;
+  return _displayed_busy || busy() ? NSTerminateCancel : NSTerminateNow;
 }
 
 - (void)theme:(int)i {
@@ -245,9 +253,23 @@ static BOOL ask(NSString* s, NSString* ok) {
 }
 
 - (void)job:(NSButton*)b {
-  static const char* kAction[] = {"install", "check", "remove"};
-  if (b.tag != 1 && !ask(b.tag ? @"Remove Framey, Fan Control, all plugins and their saved settings from the headset, and this app's key and data from this computer?" : @"Install or update Framey on the headset? If SteamVR is running it will be restarted, which ends the current VR session.", b.tag ? @"Remove" : @"Install")) return;
-  [self go:kAction[b.tag] source:@""];
+  const char* action;
+  switch (b.tag) {
+    case kInstallAction:
+      if (!ask(@"Install or update Framey on the headset? If SteamVR is running it will be restarted, which ends the current VR session.", @"Install")) return;
+      action = "install";
+      break;
+    case kCheckAction:
+      action = "check";
+      break;
+    case kRemoveAction:
+      if (!ask(@"Remove Framey, Fan Control, all plugins and their saved settings from the headset, and this app's key and data from this computer?", @"Remove")) return;
+      action = "remove";
+      break;
+    default:
+      return;
+  }
+  [self go:action source:@""];
 }
 
 - (void)addPlugin:(id)s {
@@ -274,13 +296,13 @@ static BOOL ask(NSString* s, NSString* ok) {
   }
   _since = s.next;
   _status.stringValue = ns(s.status);
-  if (s.busy != _busy) {
-    _busy = s.busy;
+  if (s.busy != _displayed_busy) {
+    _displayed_busy = s.busy;
     for (NSButton* b in _btns) {
-      b.enabled = !_busy;
-      b.alphaValue = _busy ? 0.4 : 1;
+      b.enabled = !_displayed_busy;
+      b.alphaValue = _displayed_busy ? 0.4 : 1;
     }
-    if (!_busy) _pw.stringValue = @"";
+    if (!_displayed_busy) _pw.stringValue = @"";
   }
 }
 @end

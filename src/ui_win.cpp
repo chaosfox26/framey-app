@@ -20,8 +20,11 @@ constexpr Theme kTheme[] = {
     {RGB(0x00, 0x00, 0x00), RGB(0x18, 0x18, 0x18), RGB(0xd6, 0xff, 0xd6), RGB(0x00, 0xff, 0x50)},
     {RGB(0xee, 0xeb, 0xde), RGB(0xff, 0xff, 0xfa), RGB(0x18, 0x18, 0x18), RGB(0x18, 0x18, 0x18)},
 };
+constexpr int kThemeCount = sizeof(kTheme) / sizeof(kTheme[0]);
+static_assert(kThemeCount == sizeof(kThemes) / sizeof(kThemes[0]));
 
 enum Id { TITLE = 100, SW, BEFORE = 110, S1, S2, S3, INTRO, HOSTL, PWL, HOST, PW, FAN, INSTALL, CHECK, REMOVE, SRCL, SRC, PICK, ADD, STATUS, LOG };
+static_assert(SW + kThemeCount <= BEFORE);
 
 struct Ctl {
   int id;
@@ -59,7 +62,7 @@ HWND w;
 HFONT f, big;
 HBRUSH bgb, fdb, acb;
 int cur, th, dpi;
-bool locked, fan;
+bool displayed_busy, fan;
 size_t since;
 std::wstring last;
 
@@ -134,7 +137,7 @@ void layout(bool center) {
   auto edit = [&](int id, int x, int y, int cw) { put(id, x + pad, y + pad, cw - 2 * pad, th); };
   int y = u(20);
   put(TITLE, L, y, u(320), u(40));
-  for (int i = 0; i < 4; i++) put(SW + i, L + W - (4 - i) * u(30) - (3 - i) * u(8), u(24), u(30), u(30));
+  for (int i = 0; i < kThemeCount; i++) put(SW + i, L + W - (kThemeCount - i) * u(30) - (kThemeCount - 1 - i) * u(8), u(24), u(30), u(30));
   y = u(70);
   put(BEFORE, L, y, W, lh);
   y += lh + u(4);
@@ -186,13 +189,13 @@ void build() {
     CreateWindowExW(0, cls, t, WS_CHILD | WS_VISIBLE | st, 0, 0, 0, 0, w, (HMENU)(INT_PTR)id, inst, nullptr);
   };
   mk(TITLE, L"STATIC", L"FRAMEY", 0);
-  for (int i = 0; i < 4; i++) mk(SW + i, L"BUTTON", wide(kThemes[i]).c_str(), kBtn);
+  for (int i = 0; i < kThemeCount; i++) mk(SW + i, L"BUTTON", wide(kThemes[i]).c_str(), kBtn);
   for (const Ctl& k : kCtl) mk(k.id, k.cls, k.text, k.style);
   SendMessageW(c(LOG), EM_LIMITTEXT, 0, 0);
   SendMessageW(c(SRC), EM_SETCUEBANNER, FALSE, (LPARAM)L"https://github.com/owner/repo");
   std::string host = saved("host.txt"), theme = saved("theme.txt");
   SetWindowTextW(c(HOST), host.empty() ? L"frame" : wide(host).c_str());
-  for (int i = 0; i < 4; i++)
+  for (int i = 0; i < kThemeCount; i++)
     if (theme == kThemes[i]) cur = i;
   recolor();
   layout(true);
@@ -217,10 +220,10 @@ void poll() {
     last = st;
     SetWindowTextW(c(STATUS), st.c_str());
   }
-  if (s.busy != locked) {
-    locked = s.busy;
-    for (int id : {INSTALL, CHECK, REMOVE, PICK, ADD}) EnableWindow(c(id), !locked);
-    if (!locked) SetWindowTextW(c(PW), L"");
+  if (s.busy != displayed_busy) {
+    displayed_busy = s.busy;
+    for (int id : {INSTALL, CHECK, REMOVE, PICK, ADD}) EnableWindow(c(id), !displayed_busy);
+    if (!displayed_busy) SetWindowTextW(c(PW), L"");
   }
 }
 
@@ -253,7 +256,7 @@ void draw(DRAWITEMSTRUCT* d) {
   FillRect(dc, &r, bgb);
   SelectObject(dc, f);
   SetBkMode(dc, TRANSPARENT);
-  if (id >= SW && id < SW + 4) {
+  if (id >= SW && id < SW + kThemeCount) {
     const Theme& s = kTheme[id - SW];
     box(dc, r, t.tx, id - SW == cur ? u(3) : u(1), s.bg);
     RECT i{(r.left + r.right) / 2, r.top + u(3), r.right - u(3), r.bottom - u(3)};
@@ -327,7 +330,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: {
       int id = LOWORD(wp);
       if (HIWORD(wp) != BN_CLICKED && HIWORD(wp) != BN_DOUBLECLICKED) break;
-      if (id >= SW && id < SW + 4) {
+      if (id >= SW && id < SW + kThemeCount) {
         cur = id - SW;
         save_theme(kThemes[cur]);
         recolor();
@@ -348,7 +351,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
       return 0;
     }
     case WM_CLOSE:
-      if (locked || busy()) return 0;
+      if (displayed_busy || busy()) return 0;
       break;
     case WM_DESTROY:
       PostQuitMessage(0);

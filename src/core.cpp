@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <cstdint>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -17,6 +18,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -46,8 +48,9 @@ constexpr unsigned char kPayload[] = {
 };
 
 constexpr const char* kOwner = "chaosfox26";
-constexpr const char* kRepos[] = {"framey", "frame-fan"};
 constexpr const char* kHome = "/home/steamos";
+constexpr const char* kSignerFp = "SHA256:sumclwMiONyyDcNbUAtihk4QQHu8PtIkneKbnNkMt9A";
+constexpr const char* kSigners = "framey-release namespaces=\"framey-fan-release\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINFqtW/GmqLGf01EFtx2xiWCzndt63Qm2YUFipdWkdOt\n";
 constexpr size_t kMaxFiles = 500, kMaxDepth = 8, kMaxOut = 1 << 22;
 constexpr uintmax_t kMaxBytes = 20'000'000;
 
@@ -60,6 +63,8 @@ struct Run {
 
 std::mutex g_mu;
 std::string g_log, g_status, g_pw, g_target, g_source;
+fs::path g_fan_tar;
+std::string g_fan_sha;
 bool g_fan = false;
 std::atomic<bool> g_busy{false};
 fs::path g_dir, g_work;
@@ -88,13 +93,37 @@ std::string self() {
 #endif
 }
 
-void set_env(const char* k, const char* v) {
+std::vector<std::string> env_list(const Args& extra) {
+  std::vector<std::string> v;
 #ifdef _WIN32
-  SetEnvironmentVariableA(k, v);
+  if (char* e = GetEnvironmentStringsA()) {
+    for (const char* p = e; *p; p += strlen(p) + 1) v.push_back(p);
+    FreeEnvironmentStringsA(e);
+  }
 #else
-  v ? setenv(k, v, 1) : unsetenv(k);
+  for (char** e = environ; *e; e++) v.push_back(*e);
 #endif
+  for (auto& x : extra) {
+    std::string k = x.substr(0, x.find('=')) + "=";
+    std::erase_if(v, [&](const std::string& s) { return s.starts_with(k); });
+    v.push_back(x);
+  }
+  return v;
 }
+
+#ifdef _WIN32
+std::string exe_path(const std::string& tool) {
+  std::string name = tool + ".exe";
+  const char* sr = std::getenv("SystemRoot");
+  std::string root = sr ? sr : "C:\\Windows";
+  for (const char* dir : {"\\System32\\", "\\System32\\OpenSSH\\"})
+    if (fs::exists(root + dir + name)) return root + dir + name;
+  char out[MAX_PATH];
+  const char* path = std::getenv("PATH");
+  if (path && SearchPathA(path, name.c_str(), nullptr, MAX_PATH, out, nullptr)) return out;
+  return {};
+}
+#endif
 
 uintmax_t du(const fs::path& p) {
   std::error_code ec, e2;
@@ -126,7 +155,12 @@ std::string quote(const std::string& a) {
   return o + "\"";
 }
 
-Run run_raw(const Args& a, const std::string& in, int secs, const fs::path& quota) {
+Run run_raw(const Args& a, const std::string& in, int secs, const fs::path& quota, const Args& extra) {
+  std::string exe = exe_path(a[0]);
+  if (exe.empty()) return {"could not start " + a[0], 1};
+  std::string block;
+  for (auto& s : env_list(extra)) block += s + '\0';
+  block += '\0';
   SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
   HANDLE outR, outW, inR, inW;
   CreatePipe(&outR, &outW, &sa, 0);
@@ -139,9 +173,10 @@ Run run_raw(const Args& a, const std::string& in, int secs, const fs::path& quot
   si.hStdOutput = si.hStdError = outW;
   PROCESS_INFORMATION pi{};
   std::string line;
-  for (auto& s : a) line += (line.empty() ? "" : " ") + quote(s);
+  line = quote(exe);
+  for (size_t i = 1; i < a.size(); i++) line += " " + quote(a[i]);
   Run r;
-  if (CreateProcessA(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+  if (CreateProcessA(exe.c_str(), line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, block.data(), nullptr, &si, &pi)) {
     CloseHandle(inR);
     CloseHandle(outW);
     int fate = 0;
@@ -173,7 +208,7 @@ Run run_raw(const Args& a, const std::string& in, int secs, const fs::path& quot
   return r;
 }
 #else
-Run run_raw(const Args& a, const std::string& in, int secs, const fs::path& quota) {
+Run run_raw(const Args& a, const std::string& in, int secs, const fs::path& quota, const Args& extra) {
   int ip[2], op[2];
   if (pipe(ip) || pipe(op)) return {"pipe failed", 1};
   posix_spawn_file_actions_t fa;
@@ -185,9 +220,13 @@ Run run_raw(const Args& a, const std::string& in, int secs, const fs::path& quot
   std::vector<char*> av;
   for (auto& s : a) av.push_back(const_cast<char*>(s.c_str()));
   av.push_back(nullptr);
+  auto env = env_list(extra);
+  std::vector<char*> ev;
+  for (auto& s : env) ev.push_back(s.data());
+  ev.push_back(nullptr);
   pid_t pid;
   Run r;
-  if (posix_spawnp(&pid, av[0], &fa, nullptr, av.data(), environ)) {
+  if (posix_spawnp(&pid, av[0], &fa, nullptr, av.data(), ev.data())) {
     r.out = "could not start " + a[0];
     for (int fd : {ip[0], ip[1], op[0], op[1]}) close(fd);
   } else {
@@ -235,15 +274,9 @@ Run run_raw(const Args& a, const std::string& in, int secs, const fs::path& quot
 #endif
 
 Run run(const Args& a, const std::string& in = {}, bool askpass = false, int secs = 120, const fs::path& quota = {}) {
-  if (askpass) {
-    set_env("FRAMEY_ASKPASS", "1");
-    set_env("FRAMEY_PW", g_pw.c_str());
-    set_env("SSH_ASKPASS", self().c_str());
-    set_env("SSH_ASKPASS_REQUIRE", "force");
-  }
-  Run r = run_raw(a, in, secs, quota);
-  if (askpass)
-    for (auto k : {"FRAMEY_ASKPASS", "FRAMEY_PW", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"}) set_env(k, nullptr);
+  Args env;
+  if (askpass) env = {"FRAMEY_ASKPASS=1", "FRAMEY_PW=" + g_pw, "SSH_ASKPASS=" + self(), "SSH_ASKPASS_REQUIRE=force"};
+  Run r = run_raw(a, in, secs, quota, env);
   if (r.code == 124) log(std::format("{} did not finish within {} seconds and was stopped. If this was a headset step, check that it is awake and on the network.", a[0], secs));
   return r;
 }
@@ -509,34 +542,6 @@ bool unpack_bundle(const fs::path& to) {
   return extract(tgz, to);
 }
 
-std::string stage(const std::string& repo, const fs::path& root) {
-  fs::path dest = root / (repo + ".new");
-  fs::remove_all(dest);
-  fs::create_directories(dest);
-  auto tgz = root / (repo + ".tar.gz");
-  std::string sha = latest_sha(repo);
-  if (!sha.empty() && !fetch(std::format("https://github.com/{}/{}/archive/{}.tar.gz", kOwner, repo, sha), tgz, 60).code && extract(tgz, dest, true)) {
-    std::ofstream(dest / ".version") << sha;
-    log(std::format("{}: downloaded from GitHub ({})", repo, sha.substr(0, 7)));
-    return sha;
-  }
-  fs::remove_all(dest);
-  fs::path bundle = g_work / "bundle";
-  fs::remove_all(bundle);
-  if (!unpack_bundle(bundle) || !fs::exists(bundle / repo)) return log(std::format("{}: GitHub is unreachable and the bundled copy could not be opened.", repo)), "";
-  fs::copy(bundle / repo, dest, fs::copy_options::recursive | fs::copy_options::skip_symlinks);
-  std::ifstream v(dest / ".version");
-  std::string s, cur;
-  std::getline(v, s);
-  cur = trim(ssh(std::format("cat {}/{}/.version 2>/dev/null", kHome, repo)).out);
-  if (!cur.empty() && cur != s) {
-    fs::remove_all(dest);
-    return log(std::format("{}: GitHub is unreachable, and the bundled copy ({}) is not the installed version ({}). It could be older, so nothing was changed. Try again when GitHub is reachable.", repo, s.substr(0, 7), cur.substr(0, 7))), "";
-  }
-  log(std::format("{}: GitHub unreachable, using the bundled copy ({})", repo, s.substr(0, 7)));
-  return s.empty() ? "bundled" : s;
-}
-
 bool upload(const fs::path& local, const std::string& remote_dir) {
   Args a{"scp", "-r", "-q", "-o", "BatchMode=yes"};
   for (auto& x : ssh_base()) a.push_back(x);
@@ -640,6 +645,161 @@ bool safe_url(const std::string& u) {
   return true;
 }
 
+bool github_source(const std::string& u) { return u.starts_with("https://github.com/") && u.size() <= 512 && safe_url(u); }
+
+bool allowed_fan_url(const std::string& u) {
+  auto on = [&](const char* host) { return u.starts_with(std::string("https://") + host + "/"); };
+  return u.size() <= 512 && safe_url(u) &&
+         ((on("github.com") && u.starts_with(std::format("https://github.com/{}/frame-fan/", kOwner))) || on("objects.githubusercontent.com") || on("release-assets.githubusercontent.com"));
+}
+
+std::string read_file(const fs::path& p) {
+  std::ifstream f(p, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(f), {});
+}
+
+std::string sha256_hex(const std::string& msg) {
+  static constexpr uint32_t k[64] = {
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+  uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  auto rotr = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
+  std::string d = msg + char(0x80);
+  while (d.size() % 64 != 56) d += '\0';
+  uint64_t bits = (uint64_t)msg.size() * 8;
+  for (int i = 7; i >= 0; i--) d += (char)(bits >> (8 * i));
+  for (size_t off = 0; off < d.size(); off += 64) {
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++) {
+      const unsigned char* p = (const unsigned char*)d.data() + off + 4 * i;
+      w[i] = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+    }
+    for (int i = 16; i < 64; i++) {
+      uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t v[8];
+    std::copy(h, h + 8, v);
+    for (int i = 0; i < 64; i++) {
+      uint32_t t1 = v[7] + (rotr(v[4], 6) ^ rotr(v[4], 11) ^ rotr(v[4], 25)) + ((v[4] & v[5]) ^ (~v[4] & v[6])) + k[i] + w[i];
+      uint32_t t2 = (rotr(v[0], 2) ^ rotr(v[0], 13) ^ rotr(v[0], 22)) + ((v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]));
+      for (int j = 7; j > 0; j--) v[j] = v[j - 1];
+      v[4] += t1;
+      v[0] = t1 + t2;
+    }
+    for (int i = 0; i < 8; i++) h[i] += v[i];
+  }
+  std::string out;
+  for (uint32_t x : h) out += std::format("{:08x}", x);
+  return out;
+}
+
+bool verify_release(const fs::path& tar, const fs::path& sig, const fs::path& signers) {
+  std::string bytes = read_file(tar);
+  auto r = run({"ssh-keygen", "-Y", "verify", "-f", signers.string(), "-I", "framey-release", "-n", "framey-fan-release", "-s", sig.string()}, bytes, false, 60);
+  if (r.code) log("Fan Control's release signature did not verify, so Fan Control was not installed. Nothing was changed.\n" + tail(r.out));
+  g_fan_sha = sha256_hex(bytes);
+  return !r.code;
+}
+
+std::string latest_tag(std::string& why) {
+  auto api = curl({"--max-time", "20", "-H", "Accept: application/vnd.github+json"}, std::format("https://api.github.com/repos/{}/frame-fan/releases/latest", kOwner));
+  auto tag = top_json(api.out)["tag_name"];
+  if (api.code == 22) why = "GitHub refused the request, possibly the rate limit";
+  else if (api.code) why = "GitHub is unreachable";
+  else if (tag.empty() || tag.size() > 64 || tag.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") != std::string::npos) why = "no release tag found";
+  else return tag;
+  return "";
+}
+
+struct Version {
+  std::vector<int> core;
+  std::string pre;
+};
+
+std::optional<Version> version_of(std::string s) {
+  if (s.starts_with('v')) s.erase(0, 1);
+  size_t dash = s.find('-');
+  Version v{{}, dash == std::string::npos ? "" : s.substr(dash + 1)};
+  if (v.pre.find_first_not_of("0123456789.abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos) return {};
+  std::istringstream in(s.substr(0, dash));
+  for (std::string part; std::getline(in, part, '.');) {
+    if (part.empty() || part.size() > 9 || part.find_first_not_of("0123456789") != std::string::npos) return {};
+    v.core.push_back(std::stoi(part));
+  }
+  if (v.core.empty()) return {};
+  return v;
+}
+
+int compare_versions(const Version& a, const Version& b) {
+  for (size_t i = 0; i < std::max(a.core.size(), b.core.size()); i++) {
+    int x = i < a.core.size() ? a.core[i] : 0, y = i < b.core.size() ? b.core[i] : 0;
+    if (x != y) return x < y ? -1 : 1;
+  }
+  if (a.pre == b.pre) return 0;
+  if (a.pre.empty() || b.pre.empty()) return a.pre.empty() ? 1 : -1;
+  return a.pre < b.pre ? -1 : 1;
+}
+
+bool fetch_fan(const fs::path& tgz, std::string& tag, const std::string& signers) {
+  std::string why;
+  tag = latest_tag(why);
+  if (tag.empty()) {
+    if (why == "no release tag found") log("Fan Control's release could not be found, so Fan Control was not installed. Nothing was changed.");
+    return false;
+  }
+  std::string base = std::format("https://github.com/{}/frame-fan/releases/download/{}/frame-fan.tar.gz", kOwner, tag);
+  if (!allowed_fan_url(base) || fetch(base, tgz, 120).code) return false;
+  fs::path sig = tgz.string() + ".sig", signers_file = tgz.parent_path() / "allowed_signers";
+  if (fetch(base + ".sig", sig, 60).code) return log("Fan Control's release has no signature file, so Fan Control was not installed. Nothing was changed."), false;
+  std::ofstream(signers_file, std::ios::binary) << signers;
+  return verify_release(tgz, sig, signers_file);
+}
+
+bool stage(const std::string& repo, const fs::path& root) {
+  fs::path dest = root / (repo + ".new");
+  fs::remove_all(dest);
+  fs::create_directories(dest);
+  auto tgz = root / (repo + ".tar.gz");
+  if (repo == "frame-fan") {
+    std::string tag;
+    if (!fetch_fan(tgz, tag, kSigners)) return false;
+    if (sha256_hex(read_file(tgz)) != g_fan_sha) return log("The Fan Control archive changed after its signature was checked, so Fan Control was not installed. Nothing was changed."), false;
+    auto want = version_of(tag), installed = version_of(trim(ssh(std::format("cat {}/frame-fan/.version 2>/dev/null", kHome)).out));
+    if (want && installed && compare_versions(*want, *installed) < 0) return log(std::format("Fan Control's latest signed release ({}) is older than the installed one, so Fan Control was not changed.", tag)), false;
+    if (!extract(tgz, dest, true)) return log("Fan Control's release was verified but could not be unpacked, so Fan Control was not installed. Nothing was changed."), false;
+    std::ofstream(dest / ".version") << tag;
+    g_fan_tar = tgz;
+    log(std::format("{}: signed release {} verified", repo, tag));
+    return true;
+  } else {
+    std::string sha = latest_sha(repo);
+    if (!sha.empty() && !fetch(std::format("https://github.com/{}/{}/archive/{}.tar.gz", kOwner, repo, sha), tgz, 60).code && extract(tgz, dest, true)) {
+      std::ofstream(dest / ".version") << sha;
+      log(std::format("{}: downloaded from GitHub ({})", repo, sha.substr(0, 7)));
+      return true;
+    }
+  }
+  fs::remove_all(dest);
+  fs::path bundle = g_work / "bundle";
+  fs::remove_all(bundle);
+  if (!unpack_bundle(bundle) || !fs::exists(bundle / repo)) return log(std::format("{}: GitHub is unreachable and the bundled copy could not be opened.", repo)), false;
+  fs::copy(bundle / repo, dest, fs::copy_options::recursive | fs::copy_options::skip_symlinks);
+  std::ifstream v(dest / ".version");
+  std::string s, cur;
+  std::getline(v, s);
+  cur = trim(ssh(std::format("cat {}/{}/.version 2>/dev/null", kHome, repo)).out);
+  if (!cur.empty() && cur != s) {
+    fs::remove_all(dest);
+    return log(std::format("{}: GitHub is unreachable, and the bundled copy ({}) is not the installed version ({}). It could be older, so nothing was changed. Try again when GitHub is reachable.", repo, s.substr(0, 7), cur.substr(0, 7))), false;
+  }
+  log(std::format("{}: GitHub unreachable, using the bundled copy ({})", repo, s.substr(0, 7)));
+  return true;
+}
+
 void restart_vr() {
   log("Restarting SteamVR if it is running, so Framey loads cleanly. A running VR session will end.");
   auto r = ssh("if systemctl --user is-active --quiet steamvr.service; then systemctl --user try-restart steamvr.service && sleep 3 && systemctl --user is-active --quiet steamvr.service && echo vr-restarted; else echo vr-idle; fi");
@@ -725,12 +885,20 @@ bool install_plugin(std::string src, bool restart) {
 
 const char* kService =
     "[Unit]\nDescription=Framey\n\n[Service]\nEnvironment=PYTHONDONTWRITEBYTECODE=1\n"
-    "ExecStart=/usr/bin/python3 /home/steamos/framey/framey.py\nRestart=always\nRestartSec=3\nNice=19\n"
-    "CPUSchedulingPolicy=idle\nCPUWeight=1\nMemoryHigh=40M\nMemoryMax=60M\n\n[Install]\nWantedBy=default.target\n";
+    "ExecStartPre=-/bin/sh -c \"f=%h/framey/framey.py; if [ ! -f $$f ] || ! python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' $$f; then "
+    "s=%h/framey.next; for c in %h/framey.bak %h/framey.bak.prev; do if ! python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' $$s/framey.py 2>/dev/null; then s=$$c; fi; done; "
+    "if python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' $$s/framey.py 2>/dev/null; then rm -rf %h/framey.broken; for k in plugins store; do if [ -e %h/framey/$$k ] && [ ! -e $$s/$$k ]; then mv %h/framey/$$k $$s/$$k; fi; done; "
+    "if [ -e %h/framey ]; then mv %h/framey %h/framey.broken || exit 1; fi; mv $$s %h/framey; fi; fi\"\n"
+    "ExecStart=/usr/bin/python3 /home/steamos/framey/framey.py\nRestart=always\nRestartSec=5\nNice=19\n"
+    "CPUSchedulingPolicy=idle\nCPUWeight=1\nMemoryHigh=128M\nMemoryMax=150M\nKillMode=mixed\nTimeoutStopSec=15\n\n[Install]\nWantedBy=default.target\n";
 
-std::string roll_fn(const std::string& d) {
-  return "d='" + d + "'\nroll() {\n  for n in $d; do\n    for k in plugins store; do if [ -d $n.bak ] && [ -e $n/$k ] && [ ! -e $n.bak/$k ]; then mv $n/$k $n.bak/$k; fi; done\n"
-         "    rm -rf $n\n    if [ -d $n.bak ]; then mv $n.bak $n; fi\n  done\n  [ -e framey/plugins/fan ] || rm -f framey/plugins/fan\n  systemctl --user restart framey.service\n  echo rolled-back\n  exit 1\n}\n";
+std::string rollback_script(const std::string& initial_repositories, const std::string& backup_suffix) {
+  return "d='" + initial_repositories + "'\nroll() {\n  for n in $d; do\n    for k in plugins store; do if [ -d $n" + backup_suffix + " ] && [ -e $n/$k ] && [ ! -e $n" + backup_suffix + "/$k ]; then mv $n/$k $n" + backup_suffix + "/$k; fi; done\n"
+         "    rm -rf $n\n    if [ -d $n" + backup_suffix + " ]; then mv $n" + backup_suffix + " $n; fi\n  done\n  [ -e framey/plugins/fan ] || rm -f framey/plugins/fan\n  systemctl --user restart framey.service\n  echo rolled-back\n  exit 1\n}\n";
+}
+
+std::string promote_backups_script(const std::string& names) {
+  return std::format("for n in {0}; do if [ -e $n.next ]; then rm -rf $n.bak.prev; if [ -e $n.bak ]; then mv $n.bak $n.bak.prev || exit 1; fi; mv $n.next $n.bak || exit 1; fi; done\n", names);
 }
 
 void do_install() {
@@ -743,45 +911,67 @@ void do_install() {
   std::vector<std::string> repos = {"framey"};
   if (g_fan) repos.push_back("frame-fan");
   log("[2/6] Getting the latest versions...");
-  for (auto& r : repos)
-    if (stage(r, root).empty()) return;
+  for (auto& r : repos) {
+    if (!stage(r, root)) {
+      if (r == "framey") return;
+      log("Fan Control was not installed: could not reach or verify the signed release. Run Install / Update again when online.");
+      fs::remove_all(root / (r + ".new"));
+      g_fan = false;
+      repos.pop_back();
+      break;
+    }
+    fs::remove_all(root / (r + ".new") / "tests");
+  }
   log("[3/6] Copying files to the headset...");
   std::string names;
   for (auto& r : repos) names += (names.empty() ? "" : " ") + r;
-  auto r = ssh("sh -s", std::format("cd {} || exit 1\nfor n in {}; do\n  if [ ! -e $n ] && [ -d $n.bak ]; then mv $n.bak $n || exit 1; fi\n  rm -rf $n.new $n.bak || exit 1\ndone\n", kHome, names));
+  auto r = ssh("sh -s", std::format("cd {} || exit 1\nfor n in {}; do\n  if [ ! -e $n ] && [ -d $n.next ]; then mv $n.next $n || exit 1; fi\n  if [ ! -e $n ] && [ -d $n.bak ]; then mv $n.bak $n || exit 1; fi\n  rm -rf $n.new || exit 1\ndone\n{}", kHome, names, promote_backups_script(names)));
   if (r.code) return log("Could not prepare the headset for the update.\n" + tail(r.out));
   for (auto& n : repos)
     if (!upload(root / (n + ".new"), kHome)) return;
   log("[4/6] Setting up Framey...");
-  r = ssh("sh -s", std::format("cd {0} || exit 1\nfor n in {1}; do [ -s $n.new/.version ] && {{ [ -f $n.new/framey.py ] || [ -f $n.new/plugin.json ]; }} || exit 1; done\n{4}"
+  r = ssh("sh -s", std::format("cd {0} || exit 1\nfor n in {1}; do [ -s $n.new/.version ] && {{ [ -f $n.new/framey.py ] || [ -f $n.new/plugin.json ]; }} || exit 1; done\n"
+                               "python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' framey.new/framey.py || exit 1\n{4}"
                                "mkdir -p .config/systemd/user || exit 1\nif systemctl --user is-active --quiet framey.service; then systemctl --user stop framey.service || exit 1; fi\n"
-                               "for n in {1}; do\n  if [ -e $n ]; then mv $n $n.bak || roll; fi\n  d=\"$d $n\"\n  mv $n.new $n || roll\ndone\n"
-                               "for k in plugins store; do if [ -e framey.bak/$k ] && [ ! -e framey/$k ]; then mv framey.bak/$k framey/$k || roll; fi; done\n"
+                               "for n in {1}; do\n  if [ -e $n ]; then mv $n $n.next || roll; fi\n  d=\"$d $n\"\n  mv $n.new $n || roll\ndone\n"
+                               "for k in plugins store; do if [ -e framey.next/$k ] && [ ! -e framey/$k ]; then mv framey.next/$k framey/$k || roll; fi; done\n"
                                "mkdir -p framey/plugins || roll\ncat > .config/systemd/user/framey.service <<'EOT' || roll\n{2}EOT\n{3}"
-                               "systemctl --user daemon-reload || roll\nsystemctl --user enable framey.service || roll\nsystemctl --user restart framey.service || roll\nsleep 2\nsystemctl --user is-active --quiet framey.service || roll\n",
-                               kHome, names, kService, g_fan ? "ln -sfn /home/steamos/frame-fan framey/plugins/fan || roll\n" : "", roll_fn("")));
-  if (r.code) return log((r.out.find("rolled-back") != std::string::npos ? "Framey setup failed; the previous version was restored.\n" : "Framey setup did not finish (the connection may have dropped). Run Install again.\n") + tail(r.out));
+                               "systemctl --user daemon-reload || roll\nsystemctl --user enable framey.service || roll\nsystemctl --user restart framey.service || roll\ni=0\nuntil systemctl --user is-active --quiet framey.service || [ $i -ge 15 ]; do sleep 2; i=$((i+1)); done\nsystemctl --user is-active --quiet framey.service || roll\n{5}",
+                               kHome, names, kService, g_fan ? "ln -sfn /home/steamos/frame-fan framey/plugins/fan || roll\n" : "", rollback_script("", ".next"), promote_backups_script(names)));
+  if (r.code) return log("Framey setup did not finish; the installed state is unconfirmed (the connection may have dropped). Run Install again.\n" + tail(r.out));
   if (g_fan) {
     log("[5/6] Installing Fan Control (about 20 seconds)...");
-    r = ssh(std::format("sudo -S -p '' bash {}/frame-fan/install-root.sh", kHome), g_pw + "\n");
+    std::string tar = read_file(g_fan_tar), sha = sha256_hex(tar);
+    if (sha != g_fan_sha) return log("The Fan Control archive changed after its signature was checked, so Fan Control was not installed. Framey was updated.");
+    std::ofstream(g_work / "frame-fan-root.tgz", std::ios::binary).write(tar.data(), tar.size());
+    if (!upload(g_work / "frame-fan-root.tgz", kHome)) return;
+    r = ssh(std::format("sudo -S -p '' sh -c 'd=$(mktemp -d /var/tmp/ff.XXXXXX) || exit 1; cp {0}/frame-fan-root.tgz $d/t.tgz && echo \"{1}  $d/t.tgz\" | sha256sum -c - >/dev/null && "
+                        "tar --no-same-owner --no-same-permissions -xzf $d/t.tgz -C $d && bash $d/frame-fan/install-root.sh --signer-fp {2}; rc=$?; rm -rf $d; exit $rc'; rc=$?; rm -f {0}/frame-fan-root.tgz; exit $rc",
+                        kHome, sha, kSignerFp),
+            g_pw + "\n");
     if (r.code) {
-      ssh("sh -s", std::format("cd {} || exit 1\n{}roll\n", kHome, roll_fn("frame-fan")));
-      return log("Fan Control's system step failed, although the password was accepted. Fan Control was put back as it was; Framey itself was updated (the old Framey stays in framey.bak until the next Install).\n" + tail(r.out));
+      ssh("sh -s", std::format("cd {} || exit 1\n{}roll\n", kHome, rollback_script("frame-fan", ".bak")));
+      return log("Fan Control's system step failed. Its system state and folder restoration are unconfirmed; restoring the previous Fan Control folder was attempted. Framey itself was updated (the old Framey stays in framey.bak until the next Install). Check fan control on the headset and run Install again.\n" + tail(r.out));
     }
     log(tail(r.out, 3));
+    log("The protected updater and its trust key were installed (the system step finished with exit code 0). Routine Fan Control and Framey updates can now be done inside the headset from Settings and Modules, without the password.");
   }
   log("[6/6] Updating plugins installed from links...");
   r = ssh(std::format("for d in {0}/framey/plugins/*/; do d=${{d%/}}; [ -L \"$d\" ] && continue; [ -f \"$d/.source\" ] && echo \"$(cat \"$d/.source\")\"; done", kHome));
   std::istringstream list(r.out);
   int updated = 0;
-  for (std::string u; std::getline(list, u);)
-    if (!trim(u).empty() && install_plugin(trim(u), false)) updated++;
+  for (std::string u; std::getline(list, u);) {
+    u = trim(u);
+    if (u.empty()) continue;
+    if (!github_source(u)) log("A plugin's saved source is not a github.com https link, so it was not refreshed.");
+    else if (install_plugin(u, false)) updated++;
+  }
   if (updated) ssh("systemctl --user restart framey.service");
   restart_vr();
-  r = ssh("systemctl --user is-active framey.service; ss -ltn 2>/dev/null | grep -q ':8080 ' && echo debug-port-open || echo debug-port-closed");
+  r = ssh("systemctl --user is-active --quiet framey.service && echo framey-active; ss -ltn 2>/dev/null | grep -q ':8080 ' && echo debug-port-open || echo debug-port-closed");
   if (r.out.find("debug-port-closed") != std::string::npos) log("Warning: Steam's debug port is not open. Make sure Steam is running on the headset.");
-  if (r.out.find("active") != 0 && r.out.find("\nactive") == std::string::npos) return log("Framey is not running. The previous version was kept as framey.bak on the headset.\n" + tail(r.out));
-  ssh(std::format("cd {} && rm -rf framey.bak frame-fan.bak", kHome));
+  if (r.out.find("framey-active") == std::string::npos) return log("Framey is not running. The previous version was kept as framey.bak on the headset.\n" + tail(r.out));
+  ssh(std::format("cd {} && for n in {}; do rm -rf $n.bak $n.bak.prev; done", kHome, names));
   log("\nDone. Put the headset on and tap the Framey icon in the bottom bar.");
   status("Installed.");
 }
@@ -790,21 +980,31 @@ void do_check() {
   if (!authorize()) return;
   auto r = ssh("for r in framey frame-fan; do echo $r=$(cat /home/steamos/$r/.version 2>/dev/null); done");
   if (r.code) return log("Could not read the versions from the headset.\n" + tail(r.out)), status("Check failed.");
-  std::string all;
-  for (auto repo : kRepos) {
-    auto at = r.out.find(std::string(repo) + "=");
-    std::string have_v;
-    if (at != std::string::npos) {
-      have_v = r.out.substr(at + strlen(repo) + 1, 40);
-      if (have_v.find_first_of("\r\n") != std::string::npos) have_v.clear();
-    }
-    std::string now = latest_sha(repo);
-    std::string line = std::format("{}: {}, latest {}", repo, have_v.empty() ? "not installed" : have_v.substr(0, 7), now.empty() ? "unknown" : now.substr(0, 7));
-    if (!have_v.empty() && !now.empty()) line += have_v == now ? " (up to date)" : " (update available)";
-    log(line);
-    all += line + "   ";
+  auto have = [&](const std::string& repo) {
+    std::istringstream in(r.out);
+    for (std::string l; std::getline(in, l);)
+      if (l.starts_with(repo + "=")) return trim(l.substr(repo.size() + 1));
+    return std::string{};
+  };
+  std::string fw = have("framey"), now = latest_sha("framey");
+  std::string line = std::format("framey: {}, latest {}", fw.empty() ? "not installed" : fw.substr(0, 7), now.empty() ? "unknown" : now.substr(0, 7));
+  if (!fw.empty() && !now.empty()) line += fw == now ? " (up to date)" : " (update available)";
+  log(line);
+  std::string all = line + "   ";
+  std::string why, cur = have("frame-fan"), tag = latest_tag(why);
+  if (!cur.empty() && !version_of(cur)) {
+    std::string v = top_json(ssh(std::format("cat {}/frame-fan/plugin.json 2>/dev/null", kHome)).out)["version"];
+    if (!v.empty()) cur = v;
   }
-  status(all);
+  auto want = version_of(tag), installed = version_of(cur);
+  std::string state;
+  if (!want) state = "could not check (" + (tag.empty() ? why : "unrecognized release tag") + ")";
+  else if (cur.empty()) state = "not installed";
+  else if (!installed) state = "installed version unknown: update available";
+  else state = compare_versions(*installed, *want) < 0 ? "update available" : "up to date";
+  line = std::format("frame-fan: installed {}, latest {}, {}", cur.empty() ? "none" : cur, tag.empty() ? "unknown" : tag, state);
+  log(line);
+  status(all + line);
 }
 
 std::string drop_key(const std::string& blob) {
@@ -830,17 +1030,23 @@ void do_remove() {
   if (st == "present") {
     if (g_pw.empty()) return fail("Fan Control is installed, and removing it needs the headset password. Enter it and try again.");
     log("Removing Fan Control (restores stock fan control)...");
-    fs::path b = g_work / "bundle";
-    if (ssh(std::format("mkdir -p {0}/frame-fan && test -f {0}/frame-fan/uninstall-root.sh", kHome)).code && !(unpack_bundle(b) && upload(b / "frame-fan" / "uninstall-root.sh", std::format("{}/frame-fan", kHome))))
-      return fail("Could not find Fan Control's uninstall script.");
-    auto r = ssh(std::format("sudo -S -p '' bash {}/frame-fan/uninstall-root.sh", kHome), g_pw + "\n");
+    fs::path b = g_work / "bundle", u = g_work / "frame-fan-uninstall.sh";
+    if (!unpack_bundle(b) || !fs::exists(b / "frame-fan" / "uninstall-root.sh")) return fail("Could not find Fan Control's uninstall script.");
+    fs::copy_file(b / "frame-fan" / "uninstall-root.sh", u, fs::copy_options::overwrite_existing);
+    if (!upload(u, kHome)) return fail("Could not upload Fan Control's uninstall script.");
+    std::string sha = sha256_hex(read_file(u));
+    auto r = ssh(std::format("sudo -S -p '' sh -c 'd=$(mktemp -d /var/tmp/ff.XXXXXX) || exit 1; cp {0}/frame-fan-uninstall.sh $d/u.sh && echo \"{1}  $d/u.sh\" | sha256sum -c - >/dev/null && "
+                             "rm -f /run/frame-fan.stamp && bash $d/u.sh; rc=$?; rm -rf $d; exit $rc'; rc=$?; rm -f {0}/frame-fan-uninstall.sh; exit $rc",
+                             kHome, sha),
+                 g_pw + "\n");
     log(tail(r.out, 2));
     auto on = ssh("for i in 1 2 3 4 5; do systemctl is-active --quiet deckard-fan-control && echo active && exit 0; sleep 2; done; echo inactive");
     if (r.code || root() != "clean" || trim(tail(on.out, 1)) != "active") return fail("Fan Control could not be removed (wrong password or a failed system step), so its system files may still be on the headset.");
+    log("Fan Control's uninstall script finished with exit code 0; it also removes the protected updater, its sudo rule and its trust key.");
   }
   log("Removing Framey and its plugins...");
   auto r = ssh("sh -s", "if systemctl --user cat framey.service >/dev/null 2>&1; then systemctl --user disable --now framey.service || exit 1; fi\nrm -f ~/.config/systemd/user/framey.service || exit 1\nsystemctl --user daemon-reload || exit 1\n"
-                        "rm -rf ~/framey ~/framey.new ~/framey.bak ~/frame-fan ~/frame-fan.new ~/frame-fan.bak ~/.config/framey ~/.config/frame-fan || exit 1\n");
+                        "rm -rf ~/framey ~/framey.new ~/framey.next ~/framey.bak ~/framey.bak.prev ~/framey.broken ~/frame-fan ~/frame-fan.new ~/frame-fan.next ~/frame-fan.bak ~/frame-fan.bak.prev ~/.config/framey ~/.config/frame-fan || exit 1\n");
   if (r.code) return fail("Removal had errors.\n" + tail(r.out));
   log("Removing this app's key from the headset...");
   r = ssh("sh -s", drop_key(blob));
@@ -908,8 +1114,8 @@ void start_job(const std::string& action, const std::string& host, const std::st
         ~Done() { finish(); }
       } done;
       try {
-        if (!need_tools(action, g_source)) {
-        } else if (action == "install") {
+        if (!need_tools(action, g_source)) return;
+        if (action == "install") {
           do_install();
         } else if (action == "check") {
           do_check();
@@ -974,7 +1180,10 @@ int main(int argc, char** argv) {
   signal(SIGPIPE, SIG_IGN);
 #endif
   g_dir = fs::path(self()).parent_path() / "FrameyApp-data";
+#ifdef _WIN32
+  SetCurrentDirectoryA(fs::path(self()).parent_path().string().c_str());
+#endif
   g_token = rand_hex(32);
-  log("Framey App 1.0.1, GPL-2.0 only. Source and license: https://github.com/chaosfox26/framey-app");
+  log("Framey App 1.0.2, GPL-2.0 only. Source and license: https://github.com/chaosfox26/framey-app");
   return ui_run();
 }
