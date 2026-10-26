@@ -16,7 +16,9 @@ Framey was inspired by [Decky Loader](https://github.com/SteamDeckHomebrew/decky
 
 ## Download
 
-Builds are produced by the Build workflow in this repository and attached to a GitHub release. Check the release's tag and `SHA256SUMS.txt`.
+Release builds are produced by the Build workflow in this repository and attached to a GitHub release. Check the release's tag, `SHA256SUMS.txt` and `PROVENANCE.txt`.
+
+The `experimental` branches contain source changes, not new release assets or a new update channel. Published installers contain the source recorded in their provenance. This app still fetches Framey `main` and the latest signed Fan Control release. The build workflow also pins the bundled Framey and Fan Control copies to their respective `main` commits, even when run from experimental App source; selecting that App ref does not select the other projects' experimental branches.
 
 | File | System |
 |---|---|
@@ -51,6 +53,8 @@ The Linux and macOS archives contain `FrameyApp` and `LICENSE`. Releases also ca
 - **Remove** (asks first). In this order: if Fan Control's system files are present, removes them with the headset password (restoring stock fan control). If that fails, nothing else is deleted. Then removes Framey (service, folders, backups, `framey.broken`, plugins and settings) and Fan Control's folders and settings. Then removes only this app's key line from `~/.ssh/authorized_keys` on the headset, the key files on this computer, this headset's known-hosts entry, and the data folder if no other headset's key remains. Local files that cannot be deleted are listed as leftovers. Remove does not restart SteamVR.
 
 **SteamVR restart.** Install / Update and Add plugin run `systemctl --user try-restart steamvr.service` after a successful run, and only if SteamVR is running. A stopped SteamVR stays stopped. There is no setting that turns this off, and Remove does not restart SteamVR.
+
+The separate Framey dashboard panel may not return automatically after a SteamVR restart, even when the bottom-bar/embedded UI returns and the dashboard preference is saved. In Framey Settings, use **Retry**, then reselect the dashboard option. This restored the panel in a direct headset check; automatic separate-panel recovery remains open, and the app's service/debug-port checks do not confirm overlay visibility.
 
 **Themes.** Four colour themes, chosen with the swatches: Magenta, Blue, Black (green text) and White (light). The choice is saved in `FrameyApp-data/theme.txt`.
 
@@ -91,20 +95,23 @@ The app keeps its keys, `known_hosts`, last address, theme and a per-run `work-`
 
 ## What has been verified
 
-- **Windows:** the native window was launched and inspected on Windows for the 1.0.2 build.
-- **Version 1.0.1 on a headset:** run by the author against a Steam Frame (SteamOS 0.4.5). First-time password authorization, Install with Fan Control, and the SteamVR restart worked. Framey's panel and Fan Control opened and worked in VR.
-- **Not run against a headset in 1.0.2:** the update path (staged swap, health check, backup rotation, `ExecStartPre` recovery), the Remove sequence, the signed Fan Control install, Check by release tag, and the memory limits. Local checks used fake `ssh`, `scp` and `curl`, and stubbed remote scripts. They are not headset tests.
-- **macOS and Linux:** built by CI (the code compiles). The author has not run either build.
+- **Current experimental source, 2026-10-26:** the core and GTK UI compiled and linked with Clang/CMake/Ninja on Linux; selected clang-tidy checks were clean. All 21 inert regression checks passed for workspace ownership, uncertain failure reporting and removal ordering/status propagation. They use substitutes for external operations and do not perform a real install. The existing generated payload was reused.
+- **Current Windows and macOS source:** static review only; no fresh native build or dialog execution was performed.
+- **Direct headset checks, 2026-10-26:** the experimental Framey and Fan Control snapshots were deployed and checked directly, including a SteamVR restart and manual dashboard recovery. This did not exercise this desktop app end to end, its signed Fan Control install or the signed updater path.
+- **Historical 1.0.2 checks:** an earlier Windows build's native window was launched and inspected; Linux and macOS builds compiled in CI. Earlier local installer checks used fake `ssh`, `scp` and `curl`, and stubbed remote scripts. Those results do not validate today's source.
+- **Historical 1.0.1 headset check:** run by the author against a Steam Frame (SteamOS 0.4.5). First-time password authorization, Install with Fan Control, and the SteamVR restart worked. Framey's panel and Fan Control opened and worked in VR.
+
+The current app's staged update, health check, backup rotation, `ExecStartPre` recovery, Remove sequence, signed Fan Control install, release-tag check and memory limits still lack end-to-end headset acceptance through the app.
 
 AI authorship and a successful build are not evidence that something works.
 
 ## Known open items
 
 - A theme swatch click that fails to save the theme is not reported to the user.
-- A connection drop between stopping and restarting Framey during Install leaves Framey stopped until the headset reboots or Install runs again. A reboot restores a mid-swap tree.
+- A connection drop between stopping and restarting Framey during Install can leave Framey stopped until the headset reboots or Install runs again. Startup recovery can restore a missing or unparsable tree only if a usable backup remains.
 - The recovery step does not restore a loader that crashes repeatedly after it has started.
 - Fan Control's root step unpacks the verified archive with plain `tar`, without the name checks the helper uses. The signature and the SHA-256 pin are the protection.
-- `install-root.sh` traps only EXIT, so an interrupted root step can leave partial system state.
+- Current Fan Control source handles INT, TERM and HUP by exiting through its EXIT cleanup trap. Forced termination or failed cleanup can still leave partial system state; the app runs the script from the selected signed release.
 - The signature check reads the release and its `.sig` from the user-writable work folder. A same-user process could race that window; the fix needs the verifier to read from a file descriptor.
 - The source saved for a plugin on the headset can be any `github.com` repository. Restricting it is undecided, because third-party plugins live in other repositories; a compromised headset could steer plugin installs until then.
 
@@ -117,7 +124,9 @@ AI authorship and a successful build are not evidence that something works.
 
 ## Build
 
-See [docs/development.md](docs/development.md).
+The current experimental source makes staging success explicit, gives native actions and cached UI state clearer names, checks theme palette counts, and separates rollback/backup script construction. Failure messages distinguish attempted recovery from confirmed state, and job cleanup removes its own workspace without pruning other instances' folders by age. These are maintenance changes; release selection and trust checks remain as described above.
+
+See [docs/development.md](docs/development.md) for build commands and implementation details.
 
 ## License
 
